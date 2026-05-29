@@ -6,6 +6,7 @@ from app.services.nlu_service import NLUResult, NLUService
 from app.services.recurrence_parser import RecurrenceParseResult, RecurrenceParser
 from app.services.reminder_service import ReminderService
 from app.services.time_parser import TimeParseResult, TimeParser
+from app.services.voice_command_log_service import VoiceCommandLogService
 
 __all__ = [
     "CalendarService",
@@ -22,4 +23,5 @@ __all__ = [
     "ReminderService",
     "TimeParseResult",
     "TimeParser",
+    "VoiceCommandLogService",
 ]
