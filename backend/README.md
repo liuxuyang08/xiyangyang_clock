@@ -2,7 +2,7 @@
 
 FastAPI 后端目录。
 
-当前阶段已包含配置管理、健康检查、PostgreSQL 异步连接、Redis 统一 client 管理、核心 SQLAlchemy 模型、初始化建表脚本、Repository 层、Pydantic schema、`CalendarService`、`ReminderService`、`ConflictService`、事件 REST API 和提醒 REST API。
+当前阶段已包含配置管理、健康检查、PostgreSQL 异步连接、Redis 统一 client 管理、核心 SQLAlchemy 模型、初始化建表脚本、Repository 层、Pydantic schema、`CalendarService`、`ReminderService`、`ConflictService`、`TimeParser`、事件 REST API 和提醒 REST API。
 
 尚未实现语音入口、提醒调度、WebSocket 和前端。
 
@@ -168,6 +168,7 @@ Service 位于 `app/services/`。
 - `CalendarService`
 - `ReminderService`
 - `ConflictService`
+- `TimeParser`
 
 `CalendarService` 支持：
 
@@ -212,6 +213,41 @@ Service 位于 `app/services/`。
 - 冲突规则为 `new_start < existing_end` 且 `new_end > existing_start`
 - 只返回冲突事件摘要，不做确认逻辑
 - 返回内容包含冲突事件 `id`、`title`、`start_time`、`end_time`
+
+`TimeParser` 支持：
+
+- 输入 `text`、`base_time`、`timezone`
+- 优先使用自定义中文规则解析
+- 使用 `dateparser` 作为兜底解析
+- 输出结构化 `TimeParseResult`
+- 保留兼容字段 `datetime`
+- 对区间表达返回 `start_datetime`、`end_datetime`、`is_range`
+- 对已过去的时间返回 `is_past=True` 并标记需要追问
+- 对模糊表达返回 `ambiguous=True`
+
+当前支持的基础表达：
+
+- `今天`
+- `明天`
+- `后天`
+- `本周一` 到 `本周日`
+- `下周一` 到 `下周日`
+- `上午十点`
+- `下午三点`
+- `晚上八点半`
+- `周五下午三点`
+- `下周三上午十点半`
+- `明天下午三点`
+- `后天上午九点`
+- `一小时后`
+- `半小时后`
+
+当前行为：
+
+- 只说 `月底前`、`周末`、`睡前`、`上班前` 等表达时，返回 `ambiguous=True`
+- 可解析但已经过去的时间，会返回 `is_past=True`，供业务层追问
+- 缺少明确钟点的表达仍会返回 `need_followup=True`
+- 不创建日程，不做 NLU
 
 ## API 路由
 
@@ -308,6 +344,9 @@ backend/
       conversation.py
     services/
       calendar_service.py
+      conflict_service.py
+      reminder_service.py
+      time_parser.py
     main.py
   scripts/
     init_db.py
@@ -320,13 +359,12 @@ backend/
 
 建议顺序：
 
-1. 实现时间解析服务
-2. 实现 NLU 服务
-3. 实现多轮对话服务
-4. 实现 `/api/voice/command`
-5. 实现提醒调度 worker
-6. 实现 WebSocket 推送
-7. 补充测试与 Docker 编排
+1. 实现 NLU 服务
+2. 实现多轮对话服务
+3. 实现 `/api/voice/command`
+4. 实现提醒调度 worker
+5. 实现 WebSocket 推送
+6. 补充测试与 Docker 编排
 
 ## 文档维护约定
 
