@@ -1,9 +1,10 @@
 # backend
 
-后端目录。
+FastAPI 后端目录。
 
-当前阶段已包含配置管理、健康检查、数据库连接、Redis 连接、核心 SQLAlchemy 模型和初始化建表脚本。
-尚未实现业务接口和 CRUD。
+当前阶段已包含配置管理、健康检查、PostgreSQL 异步连接、Redis 统一 client 管理、核心 SQLAlchemy 模型、初始化建表脚本、Repository 层、Pydantic schema 和 `CalendarService`。
+
+尚未实现业务 API 路由、语音入口、提醒业务、WebSocket 和 CRUD 接口。
 
 ## 依赖配置
 
@@ -11,43 +12,27 @@
 
 - `backend/requirements.txt`
 
-之所以选用 `requirements.txt`，是因为仓库目前还没有 `pyproject.toml` 或 `uv` 配置，不需要同时维护多套依赖定义。
+数据库访问方案采用异步栈：
 
-数据库访问方案采用异步栈，因此这里选用 `asyncpg`，并配合 `SQLAlchemy[asyncio]` 使用。
+- `SQLAlchemy[asyncio]`
+- `asyncpg`
 
-## 数据库初始化
+## 安装依赖
 
-当前项目还没有引入 Alembic。为了避免重复维护多套互相冲突的建表方式，现阶段只提供一个初始化脚本：
-
-- `backend/scripts/init_db.py`
-
-该脚本会基于 SQLAlchemy `Base.metadata.create_all` 创建当前核心表：
-
-- `users`
-- `events`
-- `reminders`
-- `conversation_states`
-- `voice_commands`
-
-使用前请先复制环境变量示例，并确认 `DATABASE_URL` 指向可连接的 PostgreSQL 数据库：
+在 `backend/` 目录下执行：
 
 ```powershell
-Copy-Item .env.example .env
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
 ```
-
-然后在 `backend/` 目录下执行：
-
-```powershell
-python -m scripts.init_db
-```
-
-该脚本只创建尚不存在的表，不实现迁移版本管理，也不写入业务数据。
 
 ## 配置文件
 
-- `backend/.env.example`：环境变量示例
-- `backend/.env`：本地实际配置文件，建议由 `.env.example` 复制生成
-- `backend/app/core/config.py`：配置读取入口，使用 `pydantic-settings`
+- `.env.example`：环境变量示例
+- `.env`：本地实际配置文件，建议由 `.env.example` 复制生成
+- `app/core/config.py`：配置读取入口，使用 `pydantic-settings`
 
 支持的环境变量：
 
@@ -61,20 +46,144 @@ python -m scripts.init_db
 - `WS_HEARTBEAT_INTERVAL`
 - `REMINDER_SCAN_INTERVAL`
 
-## 安装依赖
-
-在 `backend/` 目录下执行：
+复制配置：
 
 ```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-## 启动 FastAPI
+## 数据库
 
-当前已经提供最小应用入口 `backend/app/main.py`。
+数据库连接相关文件：
+
+- `app/db/base.py`：SQLAlchemy `Base`
+- `app/db/session.py`：异步 `engine`、`SessionLocal`、数据库会话 dependency、数据库健康检查
+
+当前项目还没有引入 Alembic。为了避免重复维护多套互相冲突的建表方式，现阶段只提供一个初始化脚本：
+
+- `scripts/init_db.py`
+
+该脚本会基于 SQLAlchemy `Base.metadata.create_all` 创建当前核心表：
+
+- `users`
+- `events`
+- `reminders`
+- `conversation_states`
+- `voice_commands`
+
+初始化数据库：
+
+```powershell
+python -m scripts.init_db
+```
+
+该脚本只创建尚不存在的表，不实现迁移版本管理，也不写入业务数据。
+
+## Redis
+
+Redis 统一 client 管理位于：
+
+- `app/core/redis.py`
+
+当前能力：
+
+- 读取 `REDIS_URL`
+- 统一创建 Redis async client
+- 提供 Redis 健康检查
+- 在 FastAPI lifespan 结束时关闭 Redis client
+
+后续 `conversation_state` 临时缓存和 WebSocket 在线状态都应复用这里的统一入口，不要在业务代码中散乱创建 Redis 连接。
+
+## 模型
+
+核心 SQLAlchemy 模型位于 `app/models/`：
+
+- `user.py`：`User`
+- `event.py`：`Event`
+- `reminder.py`：`Reminder`
+- `conversation_state.py`：`ConversationState`
+- `voice_command.py`：`VoiceCommand`
+
+模型约定：
+
+- `Event` 删除采用软删除，通过 `status = "deleted"` 和 `deleted_at` 表达
+- `participants`、`recurrence_rule`、`slots`、`missing_slots`、`candidate_events`、`entities` 使用 JSON 字段
+- 已建立核心查询索引，包括事件时间查询、提醒到期查询、会话状态查询和语音命令日志查询
+
+## Repository 层
+
+Repository 位于 `app/repositories/`：
+
+- `EventRepository`
+- `ReminderRepository`
+- `ConversationRepository`
+- `VoiceCommandRepository`
+
+Repository 只负责数据访问：
+
+- `create`
+- `get_by_id`
+- `update`
+- `list` / `search`
+
+补充能力：
+
+- `EventRepository.list_by_time_range`
+- `EventRepository.search_candidates`
+- `EventRepository.soft_delete`
+- `ReminderRepository.list_due_pending`
+- `ReminderRepository.update_status`
+
+Repository 方法只 `flush`，不主动 `commit`，事务边界由上层服务或 API 控制。
+
+## Schema
+
+Pydantic schema 位于 `app/schemas/`：
+
+- `common.py`：统一响应结构
+- `event.py`：`EventCreate`、`EventUpdate`、`EventRead`
+- `reminder.py`：`ReminderCreate`、`ReminderUpdate`、`ReminderRead`
+- `voice.py`：`VoiceCommandRequest`、`VoiceCommandResponse`、`VoiceCommandRead`
+- `conversation.py`：`ConversationStateRead`
+
+统一语音命令响应格式：
+
+```json
+{
+  "action": "event_created",
+  "need_user_reply": false,
+  "reply": "已为你创建明天下午 3 点的提醒：交项目文档。",
+  "data": {}
+}
+```
+
+API 后续不应直接返回 ORM 对象，应转换为 schema 或结构化响应。
+
+## Service 层
+
+Service 位于 `app/services/`。
+
+当前已实现：
+
+- `CalendarService`
+
+`CalendarService` 支持：
+
+- `create_event`
+- `list_events_by_range`
+- `get_event`
+- `update_event`
+- `soft_delete_event`
+- `search_candidate_events`
+
+当前行为：
+
+- 默认只处理 `active` 事件
+- 删除必须软删除
+- 时间范围查询按 `start_time` 排序
+- 更新事件时自动更新 `updated_at`
+
+## 启动 FastAPI
 
 在 `backend/` 目录下启动：
 
@@ -103,13 +212,66 @@ GET /api/health
 
 该接口只返回环境名和依赖连通状态，不暴露数据库地址、密钥或其他敏感配置。
 
-## 目录约定
+## 目录结构
 
-后续后端代码会按以下方向展开：
+```text
+backend/
+  app/
+    core/
+      config.py
+      redis.py
+    db/
+      base.py
+      session.py
+    models/
+      user.py
+      event.py
+      reminder.py
+      conversation_state.py
+      voice_command.py
+    repositories/
+      event_repository.py
+      reminder_repository.py
+      conversation_repository.py
+      voice_command_repository.py
+    schemas/
+      common.py
+      event.py
+      reminder.py
+      voice.py
+      conversation.py
+    services/
+      calendar_service.py
+    main.py
+  scripts/
+    init_db.py
+  .env.example
+  requirements.txt
+  README.md
+```
 
-- `app/api/`：路由层
-- `app/services/`：业务层
-- `app/repositories/`：数据访问层
-- `app/models/`：数据模型
-- `app/db/`：数据库连接与基础配置
-- `app/workers/`：调度与异步任务
+## 后续开发
+
+建议顺序：
+
+1. 实现 `ReminderService`
+2. 实现基础日程和提醒 API 路由
+3. 实现时间解析服务
+4. 实现 NLU 服务
+5. 实现多轮对话服务
+6. 实现 `/api/voice/command`
+7. 实现提醒调度 worker
+8. 实现 WebSocket 推送
+9. 补充测试与 Docker 编排
+
+## 文档维护约定
+
+后续每次后端开发都需要同步更新本文档。
+
+- 新增依赖时，更新“依赖配置”
+- 新增环境变量时，更新“配置文件”
+- 新增表、索引、初始化方式时，更新“数据库”
+- 新增 Redis 用法时，更新“Redis”
+- 新增模型、Repository、Schema、Service、API 时，更新对应章节
+- 新增启动、测试、部署命令时，更新对应使用说明
+
