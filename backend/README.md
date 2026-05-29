@@ -2,9 +2,9 @@
 
 FastAPI 后端目录。
 
-当前阶段已包含配置管理、健康检查、PostgreSQL 异步连接、Redis 统一 client 管理、核心 SQLAlchemy 模型、初始化建表脚本、Repository 层、Pydantic schema、`CalendarService`、`ReminderService` 和 `ConflictService`。
+当前阶段已包含配置管理、健康检查、PostgreSQL 异步连接、Redis 统一 client 管理、核心 SQLAlchemy 模型、初始化建表脚本、Repository 层、Pydantic schema、`CalendarService`、`ReminderService`、`ConflictService`、事件 REST API 和提醒 REST API。
 
-尚未实现业务 API 路由、语音入口、提醒业务、WebSocket 和 CRUD 接口。
+尚未实现语音入口、提醒调度、WebSocket 和前端。
 
 ## 依赖配置
 
@@ -213,6 +213,39 @@ Service 位于 `app/services/`。
 - 只返回冲突事件摘要，不做确认逻辑
 - 返回内容包含冲突事件 `id`、`title`、`start_time`、`end_time`
 
+## API 路由
+
+路由位于 `app/api/`。
+
+当前已实现事件 REST API：
+
+- `GET /api/events`
+- `POST /api/events`
+- `GET /api/events/{event_id}`
+- `PATCH /api/events/{event_id}`
+- `DELETE /api/events/{event_id}`
+
+接口约定：
+
+- `GET /api/events` 支持 `user_id`、`start`、`end` 查询参数
+- `DELETE /api/events/{event_id}` 执行软删除
+- 返回统一使用 `ApiResponse`
+- 路由层只负责参数接收、服务调用和 schema 转换，不堆业务逻辑
+
+当前已实现提醒 REST API：
+
+- `GET /api/reminders`
+- `POST /api/reminders`
+- `PATCH /api/reminders/{reminder_id}`
+- `DELETE /api/reminders/{reminder_id}`
+
+接口约定：
+
+- `GET /api/reminders` 支持 `user_id` 和 `status` 查询参数
+- `DELETE /api/reminders/{reminder_id}` 不物理删除，改为 `cancelled`
+- 返回统一使用 `ApiResponse`
+- 路由层只负责参数接收、服务调用和 schema 转换，不实现调度逻辑
+
 ## 启动 FastAPI
 
 在 `backend/` 目录下启动：
@@ -264,6 +297,9 @@ backend/
       reminder_repository.py
       conversation_repository.py
       voice_command_repository.py
+    api/
+      events.py
+      reminders.py
     schemas/
       common.py
       event.py
@@ -284,15 +320,13 @@ backend/
 
 建议顺序：
 
-1. 实现 `ReminderService`
-2. 实现基础日程和提醒 API 路由
-3. 实现时间解析服务
-4. 实现 NLU 服务
-5. 实现多轮对话服务
-6. 实现 `/api/voice/command`
-7. 实现提醒调度 worker
-8. 实现 WebSocket 推送
-9. 补充测试与 Docker 编排
+1. 实现时间解析服务
+2. 实现 NLU 服务
+3. 实现多轮对话服务
+4. 实现 `/api/voice/command`
+5. 实现提醒调度 worker
+6. 实现 WebSocket 推送
+7. 补充测试与 Docker 编排
 
 ## 文档维护约定
 

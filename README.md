@@ -2,7 +2,7 @@
 
 语音版日历工具是一个以语音交互为核心的日历助手项目，目标是把“语音输入 -> 语义理解 -> 日程操作 -> 提醒通知 -> 结果播报”这条链路结构化实现。
 
-当前仓库已经完成项目基础目录、后端基础配置、数据库与 Redis 连接、核心数据模型、初始化建表脚本、Repository 层、Pydantic schema、`CalendarService`、`ReminderService` 和 `ConflictService`。前端工程、业务 API 路由、语音入口、提醒调度和 WebSocket 尚未实现。
+当前仓库已经完成项目基础目录、后端基础配置、数据库与 Redis 连接、核心数据模型、初始化建表脚本、Repository 层、Pydantic schema、`CalendarService`、`ReminderService`、`ConflictService`、事件 REST API 和提醒 REST API。前端工程、语音入口、提醒调度和 WebSocket 尚未实现。
 
 ## 技术栈概览
 
@@ -25,6 +25,7 @@
 - `frontend/`：前端应用预留目录，后续放置 React / Vite 工程
 - `backend/`：FastAPI 后端目录
 - `backend/app/core/`：配置读取、Redis client 管理等核心基础设施
+- `backend/app/api/`：FastAPI 路由层，目前已实现事件和提醒 REST API
 - `backend/app/db/`：SQLAlchemy engine、SessionLocal、Base、数据库会话 dependency
 - `backend/app/models/`：核心 SQLAlchemy 模型
 - `backend/app/repositories/`：核心模型的数据访问层
@@ -50,11 +51,12 @@
 - 日历服务层：`CalendarService`
 - 提醒服务层：`ReminderService`
 - 冲突检测服务层：`ConflictService`
+- 事件 REST API：`GET/POST/PATCH/DELETE /api/events`
+- 提醒 REST API：`GET/POST/PATCH/DELETE /api/reminders`
 
 ## 当前未实现
 
 - 前端 React / Vite 初始化
-- 业务 API 路由
 - 统一语音命令入口 `/api/voice/command`
 - NLU / 时间解析服务
 - 多轮对话业务
@@ -117,14 +119,13 @@ GET /api/health
 
 ## 开发顺序
 
-1. 实现基础 API 路由，将 `CalendarService`、`ReminderService` 和 `ConflictService` 暴露给前端调试。
-2. 实现规则版时间解析和 NLU 基础结构。
-3. 实现统一语音命令入口 `/api/voice/command`。
-4. 实现多轮对话状态服务。
-5. 实现提醒调度 worker。
-6. 实现 WebSocket 推送。
-7. 初始化前端 React / Vite 工程。
-8. 完成前后端联调和 Docker 编排。
+1. 实现规则版时间解析和 NLU 基础结构。
+2. 实现统一语音命令入口 `/api/voice/command`。
+3. 实现多轮对话状态服务。
+4. 实现提醒调度 worker。
+5. 实现 WebSocket 推送。
+6. 初始化前端 React / Vite 工程。
+7. 完成前后端联调和 Docker 编排。
 
 ## 文档维护约定
 

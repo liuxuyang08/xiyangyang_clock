@@ -30,6 +30,7 @@ class ReminderRepository:
     async def list(
         self,
         user_id: str,
+        status: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Reminder]:
@@ -40,6 +41,10 @@ class ReminderRepository:
             .offset(offset)
             .limit(limit)
         )
+
+        if status is not None:
+            statement = statement.where(Reminder.status == status)
+
         result = await self.session.scalars(statement)
         return list(result.all())
 
@@ -64,4 +69,3 @@ class ReminderRepository:
         reminder.status = status
         await self.session.flush()
         return reminder
-

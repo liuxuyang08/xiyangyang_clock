@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.models.reminder import Reminder
 from app.repositories.reminder_repository import ReminderRepository
-from app.schemas.reminder import ReminderCreate
+from app.schemas.reminder import ReminderCreate, ReminderUpdate
 
 
 class ReminderService:
@@ -55,14 +55,34 @@ class ReminderService:
     async def list_reminders(
         self,
         user_id: str,
+        status: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Reminder]:
         return await self.reminder_repository.list(
             user_id=user_id,
+            status=status,
             limit=limit,
             offset=offset,
         )
+
+    async def update_reminder(
+        self,
+        reminder_id: str,
+        reminder_in: ReminderUpdate,
+    ) -> Reminder | None:
+        reminder = await self.reminder_repository.get_by_id(reminder_id)
+        if reminder is None:
+            return None
+
+        data = reminder_in.model_dump(exclude_unset=True)
+        if "remind_time" in data and data["remind_time"] is not None:
+            reminder_time = self._ensure_aware(data["remind_time"])
+            if reminder_time.astimezone(timezone.utc) < datetime.now(timezone.utc):
+                raise ValueError("remind_time cannot be earlier than the current time.")
+            data["remind_time"] = reminder_time
+
+        return await self.reminder_repository.update(reminder, data)
 
     async def cancel_reminder(self, reminder_id: str) -> Reminder | None:
         reminder = await self.reminder_repository.get_by_id(reminder_id)
