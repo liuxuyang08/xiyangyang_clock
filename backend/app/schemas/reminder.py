@@ -14,6 +14,7 @@ class ReminderBase(SchemaModel):
 
 class ReminderCreate(ReminderBase):
     id: str | None = None
+    allow_past_time_for_test: bool = False
 
 
 class ReminderUpdate(SchemaModel):
@@ -26,4 +27,3 @@ class ReminderUpdate(SchemaModel):
 class ReminderRead(ReminderBase):
     id: str
     created_at: datetime
-

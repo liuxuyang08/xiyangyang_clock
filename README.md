@@ -2,7 +2,7 @@
 
 语音版日历工具是一个以语音交互为核心的日历助手项目，目标是把“语音输入 -> 语义理解 -> 日程操作 -> 提醒通知 -> 结果播报”这条链路结构化实现。
 
-当前仓库已经完成项目基础目录、后端基础配置、数据库与 Redis 连接、核心数据模型、初始化建表脚本、Repository 层、Pydantic schema 和 `CalendarService`。前端工程、业务 API 路由、语音入口、提醒调度和 WebSocket 尚未实现。
+当前仓库已经完成项目基础目录、后端基础配置、数据库与 Redis 连接、核心数据模型、初始化建表脚本、Repository 层、Pydantic schema、`CalendarService`、`ReminderService` 和 `ConflictService`。前端工程、业务 API 路由、语音入口、提醒调度和 WebSocket 尚未实现。
 
 ## 技术栈概览
 
@@ -29,7 +29,7 @@
 - `backend/app/models/`：核心 SQLAlchemy 模型
 - `backend/app/repositories/`：核心模型的数据访问层
 - `backend/app/schemas/`：Pydantic schema 与统一响应结构
-- `backend/app/services/`：业务服务层，目前已实现 `CalendarService`
+- `backend/app/services/`：业务服务层，目前已实现 `CalendarService`、`ReminderService`、`ConflictService`
 - `backend/scripts/`：后端维护脚本，目前包含数据库初始化脚本
 - `scripts/`：项目级辅助脚本预留目录
 - `docker/`：Docker 与部署相关文件预留目录
@@ -48,6 +48,8 @@
 - Repository 层：`EventRepository`、`ReminderRepository`、`ConversationRepository`、`VoiceCommandRepository`
 - Pydantic schema：event、reminder、voice、conversation、common
 - 日历服务层：`CalendarService`
+- 提醒服务层：`ReminderService`
+- 冲突检测服务层：`ConflictService`
 
 ## 当前未实现
 
@@ -56,7 +58,7 @@
 - 统一语音命令入口 `/api/voice/command`
 - NLU / 时间解析服务
 - 多轮对话业务
-- ReminderService 和提醒调度 worker
+- 提醒调度 worker
 - WebSocket 推送
 - Docker 编排
 - 自动化测试
@@ -115,15 +117,14 @@ GET /api/health
 
 ## 开发顺序
 
-1. 实现 `ReminderService`，只处理提醒创建、状态更新和到期查询。
-2. 实现基础 API 路由，将 `CalendarService` 暴露给前端调试。
-3. 实现规则版时间解析和 NLU 基础结构。
-4. 实现统一语音命令入口 `/api/voice/command`。
-5. 实现多轮对话状态服务。
-6. 实现提醒调度 worker。
-7. 实现 WebSocket 推送。
-8. 初始化前端 React / Vite 工程。
-9. 完成前后端联调和 Docker 编排。
+1. 实现基础 API 路由，将 `CalendarService`、`ReminderService` 和 `ConflictService` 暴露给前端调试。
+2. 实现规则版时间解析和 NLU 基础结构。
+3. 实现统一语音命令入口 `/api/voice/command`。
+4. 实现多轮对话状态服务。
+5. 实现提醒调度 worker。
+6. 实现 WebSocket 推送。
+7. 初始化前端 React / Vite 工程。
+8. 完成前后端联调和 Docker 编排。
 
 ## 文档维护约定
 
@@ -134,4 +135,3 @@ GET /api/health
 - 尚未完成或被延后的内容，更新“当前未实现”
 - 新增启动、初始化、测试、部署命令时，更新“快速开始”或对应模块 README
 - 后端内部结构变化时，同步更新 `backend/README.md`
-

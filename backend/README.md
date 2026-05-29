@@ -2,7 +2,7 @@
 
 FastAPI 后端目录。
 
-当前阶段已包含配置管理、健康检查、PostgreSQL 异步连接、Redis 统一 client 管理、核心 SQLAlchemy 模型、初始化建表脚本、Repository 层、Pydantic schema 和 `CalendarService`。
+当前阶段已包含配置管理、健康检查、PostgreSQL 异步连接、Redis 统一 client 管理、核心 SQLAlchemy 模型、初始化建表脚本、Repository 层、Pydantic schema、`CalendarService`、`ReminderService` 和 `ConflictService`。
 
 尚未实现业务 API 路由、语音入口、提醒业务、WebSocket 和 CRUD 接口。
 
@@ -166,6 +166,8 @@ Service 位于 `app/services/`。
 当前已实现：
 
 - `CalendarService`
+- `ReminderService`
+- `ConflictService`
 
 `CalendarService` 支持：
 
@@ -182,6 +184,34 @@ Service 位于 `app/services/`。
 - 删除必须软删除
 - 时间范围查询按 `start_time` 排序
 - 更新事件时自动更新 `updated_at`
+
+`ReminderService` 支持：
+
+- `create_reminder`
+- `list_reminders`
+- `cancel_reminder`
+- `cancel_event_reminders`
+- `list_due_pending_reminders`
+- `mark_sent`
+- `mark_failed`
+
+当前行为：
+
+- `remind_time` 不能早于当前时间，除非显式启用测试标记
+- 取消日程时可以取消该日程下所有 `pending` 提醒
+- 提醒状态至少覆盖 `pending`、`sent`、`cancelled`、`failed`
+
+`ConflictService` 支持：
+
+- 判断两个时间区间是否冲突
+- 根据 `user_id`、`start_time`、`end_time` 查询冲突事件
+- 修改事件时排除当前事件自身
+
+当前行为：
+
+- 冲突规则为 `new_start < existing_end` 且 `new_end > existing_start`
+- 只返回冲突事件摘要，不做确认逻辑
+- 返回内容包含冲突事件 `id`、`title`、`start_time`、`end_time`
 
 ## 启动 FastAPI
 
@@ -274,4 +304,3 @@ backend/
 - 新增 Redis 用法时，更新“Redis”
 - 新增模型、Repository、Schema、Service、API 时，更新对应章节
 - 新增启动、测试、部署命令时，更新对应使用说明
-
