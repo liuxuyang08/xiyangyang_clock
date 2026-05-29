@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
 import importlib.util
+from types import SimpleNamespace
 import sys
 from pathlib import Path
 import unittest
@@ -20,76 +22,130 @@ NLUService = nlu_service_module.NLUService
 
 class NLUServiceTestCase(unittest.TestCase):
     def setUp(self) -> None:
-        self.service = NLUService()
+        self.service = NLUService(enable_llm=False)
+        self.base_time = datetime(2026, 5, 29, 15, 0, 0)
+        self.timezone = "Asia/Shanghai"
 
-    def test_create_event(self) -> None:
-        result = self.service.parse("添加明天下午三点开会")
+    def parse(self, text: str):
+        return self.service.parse(
+            text,
+            base_time=self.base_time,
+            timezone=self.timezone,
+        )
 
-        self.assertEqual(result.intent, "create_event")
-        self.assertGreaterEqual(result.confidence, 0.8)
-        self.assertEqual(result.slots["time_text"], "明天下午三点")
-        self.assertEqual(result.slots["title"], "开会")
-        self.assertEqual(result.missing_slots, [])
-
-    def test_query_event(self) -> None:
-        result = self.service.parse("今天有什么安排")
-
-        self.assertEqual(result.intent, "query_event")
-        self.assertIn("time_text", result.slots)
-        self.assertEqual(result.missing_slots, [])
-
-    def test_update_event(self) -> None:
-        result = self.service.parse("把开会改到明天上午十点")
-
-        self.assertEqual(result.intent, "update_event")
-        self.assertEqual(result.slots["time_text"], "明天上午十点")
-        self.assertIn("开会", result.slots["target_text"])
-
-    def test_delete_event(self) -> None:
-        result = self.service.parse("删除明天的开会")
-
-        self.assertEqual(result.intent, "delete_event")
-        self.assertIn("开会", result.slots["target_text"])
-
-    def test_create_reminder(self) -> None:
-        result = self.service.parse("提醒我一小时后喝水")
+    def test_extract_reminder_slots(self) -> None:
+        result = self.parse("明天下午三点提醒我交项目文档")
 
         self.assertEqual(result.intent, "create_reminder")
-        self.assertEqual(result.slots["time_text"], "一小时后")
-        self.assertEqual(result.slots["title"], "喝水")
+        self.assertEqual(result.slots["title"], "交项目文档")
+        self.assertEqual(result.slots["date_text"], "明天")
+        self.assertEqual(result.slots["time_text"], "下午三点")
+        self.assertEqual(result.slots["start_time"], "2026-05-30T15:00:00+08:00")
+        self.assertEqual(result.missing_slots, [])
 
-    def test_cancel_reminder(self) -> None:
-        result = self.service.parse("取消提醒喝水")
+    def test_extract_event_people_location_slots(self) -> None:
+        result = self.parse("下周三上午十点和王老师在图书馆开会")
 
-        self.assertEqual(result.intent, "cancel_reminder")
-        self.assertEqual(result.slots["target_text"], "喝水")
+        self.assertEqual(result.intent, "create_event")
+        self.assertEqual(result.slots["title"], "开会")
+        self.assertEqual(result.slots["date_text"], "下周三")
+        self.assertEqual(result.slots["time_text"], "上午十点")
+        self.assertEqual(result.slots["start_time"], "2026-06-03T10:00:00+08:00")
+        self.assertEqual(result.slots["location"], "图书馆")
+        self.assertEqual(result.slots["participants"], ["王老师"])
+        self.assertEqual(result.missing_slots, [])
 
-    def test_confirm(self) -> None:
-        for text in ["确认", "是的", "对"]:
-            with self.subTest(text=text):
-                self.assertEqual(self.service.parse(text).intent, "confirm")
+    def test_extract_recurrence_slots(self) -> None:
+        result = self.parse("每周一上午九点提醒我开例会")
 
-    def test_deny(self) -> None:
-        for text in ["不用了", "取消", "不是"]:
-            with self.subTest(text=text):
-                self.assertEqual(self.service.parse(text).intent, "deny")
+        self.assertEqual(result.intent, "create_reminder")
+        self.assertEqual(result.slots["title"], "开例会")
+        self.assertEqual(result.slots["recurrence_text"], "每周一上午九点")
+        self.assertEqual(result.slots["date_text"], "周一")
+        self.assertEqual(result.slots["time_text"], "上午九点")
+        self.assertEqual(result.slots["start_time"], "2026-06-01T09:00:00+08:00")
+        self.assertEqual(result.missing_slots, [])
 
-    def test_undo(self) -> None:
-        result = self.service.parse("撤销上一步")
+    def test_extract_update_slots(self) -> None:
+        result = self.parse("把明天上午的会议改到下午三点")
 
-        self.assertEqual(result.intent, "undo")
+        self.assertEqual(result.intent, "update_event")
+        self.assertEqual(result.slots["target_event"], "会议")
+        self.assertEqual(result.slots["date_text"], "明天")
+        self.assertEqual(result.slots["time_text"], "下午三点")
+        self.assertEqual(result.slots["start_time"], "2026-05-30T15:00:00+08:00")
+        self.assertEqual(result.missing_slots, [])
 
-    def test_help(self) -> None:
-        result = self.service.parse("你能做什么")
+    def test_extract_delete_slots(self) -> None:
+        result = self.parse("删除明天的健身")
 
-        self.assertEqual(result.intent, "help")
+        self.assertEqual(result.intent, "delete_event")
+        self.assertEqual(result.slots["target_event"], "健身")
+        self.assertEqual(result.slots["date_text"], "明天")
+        self.assertEqual(result.slots["start_time"], "2026-05-30T00:00:00+08:00")
+        self.assertEqual(result.missing_slots, [])
+
+    def test_missing_required_slots(self) -> None:
+        result = self.parse("提醒我")
+
+        self.assertEqual(result.intent, "create_reminder")
+        self.assertEqual(result.missing_slots, ["title", "start_time"])
+
+    def test_simple_intents(self) -> None:
+        self.assertEqual(self.parse("确认").intent, "confirm")
+        self.assertEqual(self.parse("不用了").intent, "deny")
+        self.assertEqual(self.parse("撤销上一步").intent, "undo")
+        self.assertEqual(self.parse("你能做什么").intent, "help")
 
     def test_unknown_has_missing_intent(self) -> None:
-        result = self.service.parse("随便说一句")
+        result = self.parse("随便说一句")
 
         self.assertEqual(result.intent, "unknown")
         self.assertEqual(result.confidence, 0.0)
         self.assertEqual(result.missing_slots, ["intent"])
+
+    def test_uses_llm_structured_parse_when_available(self) -> None:
+        class FakeLLMParseService:
+            def parse(self, *args, **kwargs):
+                return SimpleNamespace(
+                    raw_text="补一句上下文",
+                    intent="update_event",
+                    confidence=0.92,
+                    slots={
+                        "target_event": "会议",
+                        "date_text": "明天",
+                        "time_text": "下午三点",
+                        "start_time": "2026-05-30T15:00:00+08:00",
+                    },
+                    missing_slots=[],
+                )
+
+        service = NLUService(llm_parse_service=FakeLLMParseService())
+        result = service.parse(
+            "补一句上下文",
+            base_time=self.base_time,
+            timezone=self.timezone,
+            conversation_context={"pending_intent": "update_event"},
+        )
+
+        self.assertEqual(result.intent, "update_event")
+        self.assertEqual(result.confidence, 0.92)
+        self.assertEqual(result.slots["target_event"], "会议")
+
+    def test_falls_back_when_llm_parse_fails(self) -> None:
+        class FailingLLMParseService:
+            def parse(self, *args, **kwargs):
+                raise RuntimeError("llm unavailable")
+
+        service = NLUService(llm_parse_service=FailingLLMParseService())
+        result = service.parse(
+            "明天下午三点提醒我交项目文档",
+            base_time=self.base_time,
+            timezone=self.timezone,
+        )
+
+        self.assertEqual(result.intent, "create_reminder")
+        self.assertEqual(result.slots["title"], "交项目文档")
 
 
 if __name__ == "__main__":

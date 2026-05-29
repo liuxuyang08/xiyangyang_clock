@@ -2,9 +2,9 @@
 
 FastAPI 后端目录。
 
-当前阶段已包含配置管理、健康检查、PostgreSQL 异步连接、Redis 统一 client 管理、核心 SQLAlchemy 模型、初始化建表脚本、Repository 层、Pydantic schema、`CalendarService`、`ReminderService`、`ConflictService`、`TimeParser`、事件 REST API 和提醒 REST API。
+当前阶段已包含配置管理、健康检查、PostgreSQL 异步连接、Redis 统一 client 管理、核心 SQLAlchemy 模型、初始化建表脚本、Repository 层、Pydantic schema、`CalendarService`、`ReminderService`、`ConflictService`、`TimeParser`、`RecurrenceParser`、规则版 `NLUService` 实体抽取、LLM 结构化解析增强封装、事件 REST API 和提醒 REST API。
 
-尚未实现语音入口、提醒调度、WebSocket 和前端。
+尚未实现统一语音入口、提醒调度、WebSocket 和前端。
 
 ## 依赖配置
 
@@ -93,6 +93,16 @@ Redis 统一 client 管理位于：
 - 在 FastAPI lifespan 结束时关闭 Redis client
 
 后续 `conversation_state` 临时缓存和 WebSocket 在线状态都应复用这里的统一入口，不要在业务代码中散乱创建 Redis 连接。
+当前多轮对话状态服务使用以下 Redis key：
+
+- `voice:session:{session_id}`
+- `voice:user:{user_id}:state`
+- `voice:user:{user_id}:pending_confirm`
+
+TTL 建议：
+
+- 会话状态默认 15 分钟到 30 分钟
+- 待确认状态默认 10 分钟到 15 分钟
 
 ## 模型
 
@@ -169,6 +179,8 @@ Service 位于 `app/services/`。
 - `ReminderService`
 - `ConflictService`
 - `NLUService`
+- `LLMParseService`
+- `DialogService`
 - `TimeParser`
 - `RecurrenceParser`
 
@@ -253,10 +265,35 @@ Service 位于 `app/services/`。
 
 `NLUService` 支持：
 
-- 规则版意图识别
+- 规则版意图识别与实体抽取
+- 当 `OPENAI_API_KEY` 可用时，先尝试 LLM 结构化解析，再在失败时回落到规则解析
 - 输出 `intent`、`confidence`、`slots`、`missing_slots`
 - 当前识别 `create_event`、`query_event`、`update_event`、`delete_event`、`create_reminder`、`cancel_reminder`、`confirm`、`deny`、`undo`、`help`
-- 不接大模型，不执行业务操作
+- 当前抽取 `title`、`date_text`、`time_text`、`start_time`、`end_time`、`location`、`participants`、`reminder_offset_minutes`、`recurrence_text`、`target_event`
+- 时间解析可调用 `TimeParser`，时间输出使用 ISO 字符串
+- 抽取不到必填字段时返回 `missing_slots`
+- 目前优先覆盖常见中文表达，例如“明天下午三点提醒我交项目文档”“下周三上午十点和王老师在图书馆开会”“每周一上午九点提醒我开例会”“把明天上午的会议改到下午三点”“删除明天的健身”
+- LLM 封装只做结构化解析，不执行任何业务操作
+- 不把业务操作交给大模型执行
+
+`DialogService` 支持：
+
+- `get_current_state`
+- `create_pending_state`
+- `update_state_slots`
+- `set_candidates`
+- `set_need_confirm`
+- `complete_state`
+- `cancel_state`
+- `expire_state`
+
+当前行为：
+
+- 同时读取 Redis 临时状态和 `conversation_states` 持久化记录
+- Redis key 遵循 `voice:session:{session_id}`、`voice:user:{user_id}:state`、`voice:user:{user_id}:pending_confirm`
+- 状态具备 TTL
+- 短句 `确认`、`取消`、`不要了`、`是的` 等优先按当前上下文解释
+- 不执行业务执行，不直接创建日程或提醒
 
 `RecurrenceParser` 支持：
 
@@ -361,6 +398,8 @@ backend/
     services/
       calendar_service.py
       conflict_service.py
+      dialog_service.py
+      llm_parse_service.py
       nlu_service.py
       recurrence_parser.py
       reminder_service.py
@@ -369,6 +408,8 @@ backend/
   scripts/
     init_db.py
   tests/
+    test_dialog_service.py
+    test_llm_parse_service.py
     test_nlu_service.py
     test_time_parser.py
     test_recurrence_parser.py
@@ -381,12 +422,10 @@ backend/
 
 建议顺序：
 
-1. 实现 NLU 服务
-2. 实现多轮对话服务
-3. 实现 `/api/voice/command`
-4. 实现提醒调度 worker
-5. 实现 WebSocket 推送
-6. 补充测试与 Docker 编排
+1. 实现 `/api/voice/command`
+2. 实现提醒调度 worker
+3. 实现 WebSocket 推送
+4. 补充测试与 Docker 编排
 
 ## 文档维护约定
 

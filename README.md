@@ -2,7 +2,7 @@
 
 语音版日历工具是一个以语音交互为核心的日历助手项目，目标是把“语音输入 -> 语义理解 -> 日程操作 -> 提醒通知 -> 结果播报”这条链路结构化实现。
 
-当前仓库已经完成项目基础目录、后端基础配置、数据库与 Redis 连接、核心数据模型、初始化建表脚本、Repository 层、Pydantic schema、`CalendarService`、`ReminderService`、`ConflictService`、`TimeParser`、重复日程解析、规则版 `NLUService`、事件 REST API 和提醒 REST API。前端工程、语音入口、提醒调度和 WebSocket 尚未实现。
+当前仓库已经完成项目基础目录、后端基础配置、数据库与 Redis 连接、核心数据模型、初始化建表脚本、Repository 层、Pydantic schema、`CalendarService`、`ReminderService`、`ConflictService`、`TimeParser`、重复日程解析、规则版 `NLUService`、LLM 结构化解析增强封装、`DialogService` 多轮对话状态服务、事件 REST API 和提醒 REST API。当前 `NLUService` 既支持规则实体抽取，也会在配置了 `OPENAI_API_KEY` 时尝试 LLM 结构化解析，失败后自动回落到规则解析。前端工程、提醒调度和 WebSocket 尚未实现。
 
 ## 技术栈概览
 
@@ -30,7 +30,7 @@
 - `backend/app/models/`：核心 SQLAlchemy 模型
 - `backend/app/repositories/`：核心模型的数据访问层
 - `backend/app/schemas/`：Pydantic schema 与统一响应结构
-- `backend/app/services/`：业务服务层，目前已实现 `CalendarService`、`ReminderService`、`ConflictService`、`TimeParser`、`RecurrenceParser`、`NLUService`
+- `backend/app/services/`：业务服务层，目前已实现 `CalendarService`、`ReminderService`、`ConflictService`、`TimeParser`、`RecurrenceParser`、`NLUService`、`LLMParseService`、`DialogService`
 - `backend/scripts/`：后端维护脚本，目前包含数据库初始化脚本
 - `scripts/`：项目级辅助脚本预留目录
 - `docker/`：Docker 与部署相关文件预留目录
@@ -53,7 +53,8 @@
 - 冲突检测服务层：`ConflictService`
 - 中文时间解析基础规则与进阶规则：`TimeParser`
 - 中文重复日程解析：`RecurrenceParser`
-- 规则版 NLU 意图识别：`NLUService`
+- 规则版 NLU 实体抽取与 LLM 结构化解析增强：`NLUService`
+- 多轮对话状态服务：`DialogService`
 - 事件 REST API：`GET/POST/PATCH/DELETE /api/events`
 - 提醒 REST API：`GET/POST/PATCH/DELETE /api/reminders`
 
@@ -61,8 +62,8 @@
 
 - 前端 React / Vite 初始化
 - 统一语音命令入口 `/api/voice/command`
-- NLU 服务
-- 多轮对话业务
+- 更完整的 NLU 语义理解与多轮对话
+- 多轮对话业务编排
 - 提醒调度 worker
 - WebSocket 推送
 - Docker 编排
