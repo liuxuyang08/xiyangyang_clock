@@ -168,7 +168,9 @@ Service 位于 `app/services/`。
 - `CalendarService`
 - `ReminderService`
 - `ConflictService`
+- `NLUService`
 - `TimeParser`
+- `RecurrenceParser`
 
 `CalendarService` 支持：
 
@@ -248,6 +250,20 @@ Service 位于 `app/services/`。
 - 可解析但已经过去的时间，会返回 `is_past=True`，供业务层追问
 - 缺少明确钟点的表达仍会返回 `need_followup=True`
 - 不创建日程，不做 NLU
+
+`NLUService` 支持：
+
+- 规则版意图识别
+- 输出 `intent`、`confidence`、`slots`、`missing_slots`
+- 当前识别 `create_event`、`query_event`、`update_event`、`delete_event`、`create_reminder`、`cancel_reminder`、`confirm`、`deny`、`undo`、`help`
+- 不接大模型，不执行业务操作
+
+`RecurrenceParser` 支持：
+
+- 输入中文重复表达，输出 `recurrence_rule` 兼容结构和标准 `RRULE:` 字符串
+- 当前支持 `每天`、`每周一`、`每周三下午三点`、`每月 1 号`、`工作日`
+- 只负责解析重复规则，不生成重复事件实例
+- 可直接将结果保存到 `Event.recurrence_rule`
 
 ## API 路由
 
@@ -345,11 +361,17 @@ backend/
     services/
       calendar_service.py
       conflict_service.py
+      nlu_service.py
+      recurrence_parser.py
       reminder_service.py
       time_parser.py
     main.py
   scripts/
     init_db.py
+  tests/
+    test_nlu_service.py
+    test_time_parser.py
+    test_recurrence_parser.py
   .env.example
   requirements.txt
   README.md
