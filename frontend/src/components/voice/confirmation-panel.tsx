@@ -1,17 +1,8 @@
-import { Check, ListChecks, Send, X } from "lucide-react";
+import { Check, Send, X } from "lucide-react";
 import type { FormEvent } from "react";
 import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Textarea } from "@/components/ui/textarea";
 import type {
   VoiceCandidateEvent,
   VoiceCommandResponse,
@@ -45,108 +36,82 @@ export function ConfirmationPanel({
     setSupplementText("");
   }
 
+  if (!needsReply) return null;
+
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <CardTitle>对话确认</CardTitle>
-            <CardDescription>
-              用于补充信息、选择候选日程和确认二次操作。
-            </CardDescription>
-          </div>
-          <Badge variant={needsReply ? "secondary" : "muted"}>
-            {needsReply ? "等待回复" : "空闲"}
-          </Badge>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {needsReply && response ? (
-          <div className="rounded-md border bg-background p-3 text-sm leading-6">
-            {response.reply}
-          </div>
-        ) : (
-          <div className="rounded-md border border-dashed bg-muted/40 p-3 text-sm text-muted-foreground">
-            当前没有等待确认的操作。
-          </div>
-        )}
+    <div className="glass-strong rounded-2xl border border-primary/20 px-4 py-3 flex flex-col gap-3 min-w-[260px] max-w-sm">
+      <div className="flex items-center gap-2">
+        <Badge variant="secondary" className="text-xs shrink-0">等待回复</Badge>
+        <p className="text-xs text-muted-foreground truncate">{response?.reply}</p>
+      </div>
 
-        {needsReply && missingSlots.length > 0 ? (
-          <form className="space-y-3" onSubmit={handleSupplementSubmit}>
-            <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="supplement-text">
-                补充信息
-              </label>
-              <div className="flex flex-wrap gap-2">
-                {missingSlots.map((slot) => (
-                  <Badge key={slot} variant="outline">
-                    {formatMissingSlot(slot)}
-                  </Badge>
-                ))}
-              </div>
-              <Textarea
-                id="supplement-text"
-                value={supplementText}
-                placeholder="请输入需要补充的内容，例如：明天下午三点。"
-                className="min-h-20 resize-none"
-                disabled={isSubmitting}
-                onChange={(event) => setSupplementText(event.target.value)}
-              />
-            </div>
-            <Button className="w-full" disabled={!canSubmitSupplement}>
-              <Send className="size-4" aria-hidden="true" />
-              提交补充
-            </Button>
-          </form>
-        ) : null}
-
-        {needsReply && candidateEvents.length > 0 ? (
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 text-sm font-medium">
-              <ListChecks className="size-4" aria-hidden="true" />
-              候选日程
-            </div>
-            <div className="space-y-2">
-              {candidateEvents.map((candidate, index) => (
-                <button
-                  key={candidate.id || `${candidate.title}-${index}`}
-                  type="button"
-                  className="w-full rounded-md border bg-background p-3 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
-                  disabled={isSubmitting}
-                  onClick={() =>
-                    onSubmitReply(buildCandidateSelectionText(candidate, index))
-                  }
-                >
-                  <span className="block font-medium">
-                    {index + 1}. {candidate.title || candidate.id}
-                  </span>
-                  <span className="mt-1 block text-xs text-muted-foreground">
-                    {formatCandidateMeta(candidate)}
-                  </span>
-                </button>
-              ))}
-            </div>
+      {missingSlots.length > 0 ? (
+        <form className="flex items-center gap-2" onSubmit={handleSupplementSubmit}>
+          <div className="flex flex-wrap gap-1 shrink-0">
+            {missingSlots.map((slot) => (
+              <Badge key={slot} variant="outline" className="text-xs border-white/10">
+                {formatMissingSlot(slot)}
+              </Badge>
+            ))}
           </div>
-        ) : null}
+          <input
+            id="supplement-text"
+            type="text"
+            value={supplementText}
+            placeholder="补充内容…"
+            className="flex-1 bg-transparent border-none outline-none text-sm text-foreground placeholder:text-muted-foreground/40 min-w-0"
+            disabled={isSubmitting}
+            onChange={(e) => setSupplementText(e.target.value)}
+          />
+          <button
+            type="submit"
+            disabled={!canSubmitSupplement}
+            className="flex size-7 shrink-0 items-center justify-center rounded-full bg-primary/80 hover:bg-primary disabled:opacity-30 transition-all"
+            aria-label="提交补充"
+          >
+            <Send className="size-3 text-white" aria-hidden="true" />
+          </button>
+        </form>
+      ) : null}
 
-        {needsReply && isConfirmAction ? (
-          <div className="grid grid-cols-2 gap-3">
-            <Button disabled={isSubmitting} onClick={() => onSubmitReply("确认")}>
-              <Check className="size-4" aria-hidden="true" />
-              确认
-            </Button>
-            <Button
-              variant="outline"
+      {candidateEvents.length > 0 ? (
+        <div className="flex flex-wrap gap-2">
+          {candidateEvents.map((candidate, index) => (
+            <button
+              key={candidate.id || `${candidate.title}-${index}`}
+              type="button"
+              className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-left text-xs hover:bg-white/10 disabled:opacity-50 transition-colors"
               disabled={isSubmitting}
-              onClick={() => onSubmitReply("取消")}
+              onClick={() => onSubmitReply(buildCandidateSelectionText(candidate, index))}
             >
-              <X className="size-4" aria-hidden="true" />
-              取消
-            </Button>
-          </div>
-        ) : null}
-      </CardContent>
-    </Card>
+              <span className="font-medium">{index + 1}. {candidate.title || candidate.id}</span>
+              <span className="block text-muted-foreground/60 mt-0.5">{formatCandidateMeta(candidate)}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {isConfirmAction ? (
+        <div className="flex gap-2">
+          <button
+            type="button"
+            disabled={isSubmitting}
+            onClick={() => onSubmitReply("确认")}
+            className="flex items-center gap-1.5 rounded-lg bg-primary/80 hover:bg-primary px-3 py-1.5 text-xs text-white font-medium disabled:opacity-50 transition-colors"
+          >
+            <Check className="size-3" aria-hidden="true" />确认
+          </button>
+          <button
+            type="button"
+            disabled={isSubmitting}
+            onClick={() => onSubmitReply("取消")}
+            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 px-3 py-1.5 text-xs text-muted-foreground font-medium disabled:opacity-50 transition-colors"
+          >
+            <X className="size-3" aria-hidden="true" />取消
+          </button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

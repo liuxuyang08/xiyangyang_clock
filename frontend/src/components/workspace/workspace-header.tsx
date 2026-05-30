@@ -16,17 +16,17 @@ export function WorkspaceHeader({
   onReconnectWebSocket,
 }: WorkspaceHeaderProps) {
   return (
-    <header className="border-b bg-background">
+    <header className="relative border-b border-white/8 glass-strong sticky top-0 z-50">
       <div className="mx-auto flex max-w-[1480px] flex-col gap-3 px-4 py-4 md:flex-row md:items-center md:justify-between md:px-6">
         <div className="flex min-w-0 items-center gap-3">
-          <div className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-muted">
-            <CalendarDays className="size-4" aria-hidden="true" />
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-xl glass glow-primary">
+            <CalendarDays className="size-5 text-primary" aria-hidden="true" />
           </div>
           <div className="min-w-0">
-            <h1 className="truncate text-base font-semibold tracking-normal">
+            <h1 className="truncate text-lg font-bold tracking-tight gradient-text">
               Xiyangyang Clock
             </h1>
-            <p className="mt-0.5 truncate text-sm text-muted-foreground">
+            <p className="mt-0.5 truncate text-xs tracking-widest uppercase text-muted-foreground/60">
               语音日程工作台
             </p>
           </div>
@@ -40,6 +40,7 @@ export function WorkspaceHeader({
           onReconnect={onReconnectWebSocket}
         />
       </div>
+      <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent" />
     </header>
   );
 }

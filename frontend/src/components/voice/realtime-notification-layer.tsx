@@ -1,4 +1,6 @@
+import { useEffect, useRef } from "react";
 import { Bell, CheckCircle2, MessageSquareText, X } from "lucide-react";
+import gsap from "gsap";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,6 +30,39 @@ export function RealtimeNotificationLayer({
   onDismissReminder,
   onOpenReminderEvent,
 }: RealtimeNotificationLayerProps) {
+  const notifRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  const dismissWithAnimation = (id: string, onDismiss: () => void) => {
+    const el = notifRefs.current.get(id);
+    if (el) {
+      gsap.to(el, {
+        x: "110%",
+        opacity: 0,
+        duration: 0.3,
+        ease: "power2.in",
+        onComplete: onDismiss,
+      });
+    } else {
+      onDismiss();
+    }
+  };
+
+  useEffect(() => {
+    const allIds = [
+      ...(notice ? [notice.id] : []),
+      ...reminders.map((r) => r.id),
+    ];
+    for (const id of allIds) {
+      const el = notifRefs.current.get(id);
+      if (el) {
+        gsap.fromTo(el,
+          { x: "100%", opacity: 0 },
+          { x: "0%", opacity: 1, duration: 0.4, ease: "back.out(1.2)" }
+        );
+      }
+    }
+  }, [notice, reminders]);
+
   if (!notice && reminders.length === 0) {
     return null;
   }
@@ -35,7 +70,14 @@ export function RealtimeNotificationLayer({
   return (
     <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-[min(420px,calc(100vw-2rem))] flex-col gap-3">
       {notice ? (
-        <div className="pointer-events-auto rounded-lg border bg-background p-4 shadow-xl">
+        <div
+          id={`notif-${notice.id}`}
+          ref={(el) => {
+            if (el) notifRefs.current.set(notice.id, el);
+            else notifRefs.current.delete(notice.id);
+          }}
+          className="pointer-events-auto glass-strong rounded-2xl border border-white/10 p-4 shadow-2xl"
+        >
           <div className="flex items-start justify-between gap-3">
             <div className="flex min-w-0 gap-3">
               {notice.type === "command_completed" ? (
@@ -62,7 +104,7 @@ export function RealtimeNotificationLayer({
               variant="outline"
               size="icon"
               aria-label="关闭实时消息"
-              onClick={onDismissNotice}
+              onClick={() => dismissWithAnimation(notice.id, onDismissNotice)}
             >
               <X className="size-4" aria-hidden="true" />
             </Button>
@@ -73,7 +115,12 @@ export function RealtimeNotificationLayer({
       {reminders.map((reminder) => (
         <div
           key={reminder.id}
-          className="pointer-events-auto rounded-lg border bg-background p-4 shadow-xl"
+          id={`notif-${reminder.id}`}
+          ref={(el) => {
+            if (el) notifRefs.current.set(reminder.id, el);
+            else notifRefs.current.delete(reminder.id);
+          }}
+          className="pointer-events-auto glass-strong rounded-2xl border border-white/10 p-4 shadow-2xl"
         >
           <div className="flex items-start justify-between gap-3">
             <div className="flex min-w-0 gap-3">
@@ -104,7 +151,7 @@ export function RealtimeNotificationLayer({
                     type="button"
                     variant="outline"
                     size="sm"
-                    onClick={() => onDismissReminder(reminder.id)}
+                    onClick={() => dismissWithAnimation(reminder.id, () => onDismissReminder(reminder.id))}
                   >
                     关闭
                   </Button>
@@ -116,7 +163,7 @@ export function RealtimeNotificationLayer({
               variant="outline"
               size="icon"
               aria-label="关闭提醒"
-              onClick={() => onDismissReminder(reminder.id)}
+              onClick={() => dismissWithAnimation(reminder.id, () => onDismissReminder(reminder.id))}
             >
               <X className="size-4" aria-hidden="true" />
             </Button>

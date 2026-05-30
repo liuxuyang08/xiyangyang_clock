@@ -1,23 +1,18 @@
+import { useEffect, useRef } from "react";
 import {
   Loader2,
-  MessageSquareText,
   RotateCcw,
   Square,
   Volume2,
   VolumeX,
 } from "lucide-react";
+import gsap from "gsap";
+import { TextPlugin } from "gsap/TextPlugin";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { ACTIVE_TEXT_TO_SPEECH_PROVIDER } from "@/lib/text-to-speech";
 import type { VoiceCommandResponse } from "@/types/voice";
+
+gsap.registerPlugin(TextPlugin);
 
 type AssistantReplyPanelProps = {
   response: VoiceCommandResponse | null;
@@ -43,115 +38,87 @@ export function AssistantReplyPanel({
   const hasReply = Boolean(response?.reply);
   const canReplay = hasReply && isTtsSupported !== false;
 
+  const replyBoxRef = useRef<HTMLDivElement>(null);
+  const replyTextRef = useRef<HTMLParagraphElement>(null);
+
+  useEffect(() => {
+    if (!replyBoxRef.current) return;
+    if (isSubmitting) return;
+
+    if (response?.reply && replyTextRef.current) {
+      gsap.fromTo(replyBoxRef.current,
+        { opacity: 0, y: 8 },
+        { opacity: 1, y: 0, duration: 0.35, ease: "power2.out" }
+      );
+      gsap.fromTo(replyTextRef.current,
+        { text: { value: "" } },
+        {
+          text: { value: response.reply },
+          duration: Math.min(response.reply.length * 0.025, 2.5),
+          ease: "none",
+          delay: 0.2,
+        }
+      );
+    }
+  }, [response?.reply, isSubmitting]);
+
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <MessageSquareText className="size-4" aria-hidden="true" />
-              系统回复
-            </CardTitle>
-            <CardDescription>提交文本后展示后端返回的 reply。</CardDescription>
+    <div className="flex flex-1 items-center gap-2 glass rounded-2xl px-4 py-2.5 min-w-0">
+      {/* 回复文字 */}
+      <div ref={replyBoxRef} className="flex-1 min-w-0">
+        {isSubmitting ? (
+          <div className="flex items-center gap-2 text-muted-foreground/60 text-sm">
+            <Loader2 className="size-3.5 animate-spin shrink-0" aria-hidden="true" />
+            <span className="truncate">正在处理…</span>
           </div>
-          {response ? (
-            <Badge variant={response.need_user_reply ? "secondary" : "outline"}>
-              {response.action}
-            </Badge>
-          ) : null}
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="min-h-24 rounded-md bg-secondary/60 p-3 text-sm">
-          {isSubmitting ? (
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-              正在提交语音命令
-            </div>
-          ) : response?.reply ? (
-            <p className="leading-6 text-foreground">{response.reply}</p>
-          ) : (
-            <p className="text-muted-foreground">暂无系统回复。</p>
-          )}
-        </div>
-        <div className="rounded-md border bg-background p-3">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="space-y-1">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                {isTtsEnabled ? (
-                  <Volume2 className="size-4" aria-hidden="true" />
-                ) : (
-                  <VolumeX className="size-4" aria-hidden="true" />
-                )}
-                语音播报
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {getTtsStatusText({
-                  isEnabled: isTtsEnabled,
-                  isSpeaking: isTtsSpeaking,
-                  isSupported: isTtsSupported,
-                })}
-              </p>
-            </div>
-            <div className="grid grid-cols-2 gap-2 sm:flex">
-              <Button
-                type="button"
-                variant={isTtsEnabled ? "default" : "outline"}
-                size="sm"
-                disabled={isTtsSupported === false}
-                aria-pressed={isTtsEnabled}
-                onClick={() => onToggleTts(!isTtsEnabled)}
-              >
-                {isTtsEnabled ? "已开启" : "已关闭"}
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={!canReplay}
-                onClick={onReplay}
-              >
-                <RotateCcw className="size-4" aria-hidden="true" />
-                重播
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={!isTtsSpeaking}
-                onClick={onStopSpeaking}
-              >
-                <Square className="size-4" aria-hidden="true" />
-                停止
-              </Button>
-            </div>
+        ) : response?.reply ? (
+          <div className="flex items-center gap-2 min-w-0">
+            <p ref={replyTextRef} className="leading-6 text-foreground text-sm flex-1 truncate" />
+            {response.action && (
+              <Badge variant="outline" className="shrink-0 text-xs border-white/10 text-muted-foreground">
+                {response.action}
+              </Badge>
+            )}
           </div>
-          <p className="mt-3 text-xs text-muted-foreground">
-            当前使用 {ACTIVE_TEXT_TO_SPEECH_PROVIDER} TTS。OpenAI
-            Text-to-Speech 接入位已预留，当前未启用云端播报。
-          </p>
-        </div>
-      </CardContent>
-    </Card>
+        ) : (
+          <p className="text-sm text-muted-foreground/40 truncate">助手回复将显示在这里…</p>
+        )}
+      </div>
+
+      {/* TTS 控制按钮组 */}
+      <div className="flex items-center gap-1 shrink-0">
+        <button
+          type="button"
+          disabled={isTtsSupported === false}
+          aria-pressed={isTtsEnabled}
+          onClick={() => onToggleTts(!isTtsEnabled)}
+          className="flex size-8 items-center justify-center rounded-full hover:bg-white/8 transition-colors disabled:opacity-30"
+          aria-label={isTtsEnabled ? "关闭语音播报" : "开启语音播报"}
+        >
+          {isTtsEnabled
+            ? <Volume2 className="size-4 text-primary" aria-hidden="true" />
+            : <VolumeX className="size-4 text-muted-foreground/50" aria-hidden="true" />
+          }
+        </button>
+        <button
+          type="button"
+          disabled={!canReplay}
+          onClick={onReplay}
+          className="flex size-8 items-center justify-center rounded-full hover:bg-white/8 transition-colors disabled:opacity-30"
+          aria-label="重播"
+        >
+          <RotateCcw className="size-4 text-muted-foreground/70" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          disabled={!isTtsSpeaking}
+          onClick={onStopSpeaking}
+          className="flex size-8 items-center justify-center rounded-full hover:bg-white/8 transition-colors disabled:opacity-30"
+          aria-label="停止播报"
+        >
+          <Square className="size-4 text-muted-foreground/70" aria-hidden="true" />
+        </button>
+      </div>
+    </div>
   );
-}
-
-function getTtsStatusText({
-  isEnabled,
-  isSpeaking,
-  isSupported,
-}: {
-  isEnabled: boolean;
-  isSpeaking: boolean;
-  isSupported: boolean | null;
-}) {
-  if (isSupported === false) {
-    return "当前浏览器不支持 SpeechSynthesis，仅显示文字回复。";
-  }
-
-  if (isSpeaking) {
-    return "正在播报最近一次系统回复。";
-  }
-
-  return isEnabled ? "后端返回 reply 后会自动播报。" : "自动播报已关闭。";
 }

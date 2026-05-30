@@ -1,16 +1,6 @@
+import { useEffect, useRef } from "react";
 import { Loader2, Mic, Send, Square } from "lucide-react";
-import type { FormEvent } from "react";
-
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Textarea } from "@/components/ui/textarea";
+import gsap from "gsap";
 
 type VoiceInputPanelProps = {
   value: string;
@@ -28,107 +18,115 @@ type VoiceInputPanelProps = {
 
 export function VoiceInputPanel({
   value,
-  sessionId,
   isListening,
   isSubmitting,
   isSpeechSupported,
-  speechError,
-  submitError,
   onChange,
   onStartListening,
   onStopListening,
   onSubmit,
 }: VoiceInputPanelProps) {
   const canSubmit = value.trim().length > 0 && !isSubmitting;
-  const canStartListening =
-    isSpeechSupported !== false && !isListening && !isSubmitting;
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (canSubmit) {
-      onSubmit();
+  const barsRef = useRef<SVGGElement>(null);
+  const tweenRef = useRef<gsap.core.Tween | null>(null);
+
+  useEffect(() => {
+    const bars = barsRef.current?.querySelectorAll("rect");
+    if (!bars || bars.length === 0) return;
+
+    if (isListening) {
+      tweenRef.current = gsap.to(bars, {
+        scaleY: () => Math.random() * 0.75 + 0.25,
+        duration: 0.12,
+        repeat: -1,
+        yoyo: true,
+        stagger: { each: 0.04, repeat: -1 },
+        transformOrigin: "50% 100%",
+        ease: "power1.inOut",
+      });
+    } else {
+      tweenRef.current?.kill();
+      gsap.to(bars, { scaleY: 0.25, duration: 0.4, ease: "power2.out" });
     }
-  }
+
+    return () => { tweenRef.current?.kill(); };
+  }, [isListening]);
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <CardTitle>语音输入</CardTitle>
-            <CardDescription>
-              使用 Web Speech API 识别语音，也可以手动输入文本。
-            </CardDescription>
-          </div>
-          <Badge variant={isListening ? "secondary" : "muted"}>
-            {isListening ? "识别中" : "待输入"}
-          </Badge>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <form className="space-y-4" onSubmit={handleSubmit}>
-          {isSpeechSupported === false ? (
-            <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
-              当前浏览器不支持 Web Speech API，请使用手动输入文本。
-            </div>
-          ) : null}
-          {speechError ? (
-            <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
-              {speechError}
-            </div>
-          ) : null}
-          <div className="grid grid-cols-[1fr_auto] gap-3">
-            <Button
-              className="justify-start"
-              disabled={!canStartListening}
-              type="button"
-              onClick={onStartListening}
-            >
-              <Mic className="size-4" aria-hidden="true" />
-              开始识别
-            </Button>
-            <Button
-              variant="outline"
-              size="icon"
-              disabled={!isListening}
-              type="button"
-              aria-label="停止识别"
-              onClick={onStopListening}
-            >
-              <Square className="size-4" aria-hidden="true" />
-            </Button>
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm font-medium" htmlFor="voice-command-text">
-              命令文本
-            </label>
-            <Textarea
-              id="voice-command-text"
-              value={value}
-              placeholder="例如：明天下午三点提醒我交项目文档。"
-              className="min-h-28 resize-none"
-              disabled={isSubmitting}
-              onChange={(event) => onChange(event.target.value)}
+    <div className="flex items-center gap-3 w-full">
+      {/* 圆形麦克风按钮 */}
+      <button
+        type="button"
+        disabled={isSpeechSupported === false || isSubmitting}
+        onClick={isListening ? onStopListening : onStartListening}
+        className={[
+          "relative flex size-14 shrink-0 items-center justify-center rounded-full",
+          "transition-all duration-300 focus:outline-none",
+          isListening
+            ? "bg-destructive glow-pulse shadow-lg shadow-destructive/40"
+            : "glass glow-primary hover:scale-105 active:scale-95",
+        ].join(" ")}
+        aria-label={isListening ? "停止识别" : "开始识别"}
+      >
+        {isListening
+          ? <Square className="size-5 text-white" aria-hidden="true" />
+          : <Mic className="size-5 text-primary" aria-hidden="true" />
+        }
+        {isListening && (
+          <span className="absolute inset-0 rounded-full animate-ping bg-destructive/25 pointer-events-none" />
+        )}
+      </button>
+
+      <svg
+        width="44"
+        height="32"
+        viewBox="0 0 44 32"
+        className="shrink-0 hidden sm:block"
+        aria-hidden="true"
+      >
+        <g ref={barsRef}>
+          {[4, 10, 16, 22, 28, 34, 40].map((x, i) => (
+            <rect
+              key={i}
+              x={x - 1.5}
+              y={4}
+              width={3}
+              height={24}
+              rx={1.5}
+              className={isListening ? "fill-primary" : "fill-muted-foreground/25"}
+              style={{ transformOrigin: `${x}px 28px` }}
             />
-            <p className="text-xs text-muted-foreground">
-              session_id 已保存：{sessionId.slice(0, 8)}
-            </p>
-          </div>
-          {submitError ? (
-            <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
-              {submitError}
-            </div>
-          ) : null}
-          <Button className="w-full justify-center" disabled={!canSubmit}>
-            {isSubmitting ? (
-              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-            ) : (
-              <Send className="size-4" aria-hidden="true" />
-            )}
-            提交文本
-          </Button>
-        </form>
-      </CardContent>
-    </Card>
+          ))}
+        </g>
+      </svg>
+
+      {/* 输入区域 */}
+      <form
+        className="flex flex-1 items-center gap-2 glass rounded-2xl px-4 py-2.5"
+        onSubmit={(e) => { e.preventDefault(); if (canSubmit) onSubmit(); }}
+      >
+        <input
+          id="voice-command-text"
+          type="text"
+          value={value}
+          placeholder="说话或输入命令，例如：明天下午三点提醒我..."
+          className="flex-1 bg-transparent border-none outline-none text-sm text-foreground placeholder:text-muted-foreground/40 min-w-0"
+          disabled={isSubmitting}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <button
+          type="submit"
+          disabled={!canSubmit}
+          className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/80 hover:bg-primary disabled:opacity-30 transition-all"
+          aria-label="提交"
+        >
+          {isSubmitting
+            ? <Loader2 className="size-3.5 animate-spin text-white" aria-hidden="true" />
+            : <Send className="size-3.5 text-white" aria-hidden="true" />
+          }
+        </button>
+      </form>
+    </div>
   );
 }

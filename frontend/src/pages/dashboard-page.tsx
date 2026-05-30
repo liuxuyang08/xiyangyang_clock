@@ -39,6 +39,7 @@ import type {
   VoiceRealtimeMessage,
 } from "@/types/realtime";
 import type { VoiceCommandResponse } from "@/types/voice";
+import gsap from "gsap";
 
 const DEFAULT_USER_ID = "u001";
 const HIGHLIGHT_DURATION_MS = 18_000;
@@ -66,6 +67,9 @@ export function DashboardPage() {
     null,
   );
   const highlightTimersRef = useRef<number[]>([]);
+  const headerWrapRef = useRef<HTMLDivElement>(null);
+  const calendarWrapRef = useRef<HTMLDivElement>(null);
+  const voiceBarRef = useRef<HTMLDivElement>(null);
   const speechRecognition = useSpeechRecognition();
   const textToSpeech = useSpeechSynthesis();
   const { events, error, isLoading, refresh } = useEvents({
@@ -90,6 +94,30 @@ export function DashboardPage() {
       );
       highlightTimersRef.current = [];
     };
+  }, []);
+
+  useEffect(() => {
+    const ctx = gsap.context(() => {
+      const tl = gsap.timeline({ defaults: { ease: "power3.out" } });
+      tl.fromTo(
+        headerWrapRef.current,
+        { y: -50, opacity: 0 },
+        { y: 0, opacity: 1, duration: 0.6 }
+      )
+      .fromTo(
+        calendarWrapRef.current,
+        { y: 40, opacity: 0, scale: 0.97 },
+        { y: 0, opacity: 1, scale: 1, duration: 0.8 },
+        "-=0.35"
+      )
+      .fromTo(
+        voiceBarRef.current,
+        { y: 80, opacity: 0 },
+        { y: 0, opacity: 1, duration: 0.6 },
+        "-=0.45"
+      );
+    });
+    return () => ctx.revert();
   }, []);
 
   const highlightEvent = useCallback((eventId: string) => {
@@ -208,54 +236,17 @@ export function DashboardPage() {
   }, []);
 
   return (
-    <main className="min-h-[100dvh] bg-muted/30 text-foreground">
-      <WorkspaceHeader
-        websocketError={websocket.lastError}
-        websocketStatus={websocket.status}
-        onReconnectWebSocket={websocket.reconnectNow}
-      />
-      <div className="mx-auto grid max-w-[1480px] gap-4 px-4 py-4 md:px-6 md:py-5 xl:grid-cols-[360px_minmax(0,1fr)_340px]">
-        <section className="grid content-start gap-4">
-          <VoiceInputPanel
-            value={voiceText}
-            sessionId={sessionId}
-            isListening={speechRecognition.isListening}
-            isSubmitting={isVoiceSubmitting}
-            isSpeechSupported={speechRecognition.isSupported}
-            speechError={speechRecognition.error}
-            submitError={voiceSubmitError}
-            onChange={setVoiceText}
-            onStartListening={speechRecognition.start}
-            onStopListening={speechRecognition.stop}
-            onSubmit={handleVoiceSubmit}
-          />
-          <TranscriptPanel
-            finalText={voiceText}
-            interimText={speechRecognition.interimTranscript}
-            isListening={speechRecognition.isListening}
-          />
-          <AssistantReplyPanel
-            response={voiceResponse}
-            isSubmitting={isVoiceSubmitting}
-            isTtsEnabled={textToSpeech.isEnabled}
-            isTtsSpeaking={textToSpeech.isSpeaking}
-            isTtsSupported={textToSpeech.isSupported}
-            onReplay={() => {
-              if (voiceResponse?.reply) {
-                textToSpeech.speak(voiceResponse.reply, { force: true });
-              }
-            }}
-            onStopSpeaking={textToSpeech.stop}
-            onToggleTts={textToSpeech.setEnabled}
-          />
-          <ConfirmationPanel
-            response={voiceResponse}
-            isSubmitting={isVoiceSubmitting}
-            onSubmitReply={(text) => {
-              void submitVoiceText(text);
-            }}
-          />
-        </section>
+    <main className="min-h-[100dvh] text-foreground">
+      <div ref={headerWrapRef}>
+        <WorkspaceHeader
+          websocketError={websocket.lastError}
+          websocketStatus={websocket.status}
+          onReconnectWebSocket={websocket.reconnectNow}
+        />
+      </div>
+
+      {/* 主内容区：日历占满，底部留出浮动栏高度 */}
+      <div ref={calendarWrapRef} className="mx-auto max-w-[1480px] px-4 pt-4 pb-36 md:px-6">
         <CalendarPanel
           events={calendarEvents}
           error={error}
@@ -265,11 +256,64 @@ export function DashboardPage() {
           onRangeChange={handleRangeChange}
           onRetry={refresh}
         />
+      </div>
+
+      {/* 右侧事件详情面板：固定定位，从右侧滑入 */}
+      <aside
+        className="fixed right-0 top-[73px] bottom-[120px] w-[300px] glass-strong overflow-y-auto transition-transform duration-500 ease-out z-30"
+        style={{ transform: selectedEvent ? 'translateX(0)' : 'translateX(100%)' }}
+      >
         <EventDetailsSidebar
           event={selectedEvent}
           onOpenDrawer={() => setIsDrawerOpen(true)}
         />
+      </aside>
+
+      {/* 底部语音浮动栏 */}
+      <div ref={voiceBarRef} className="fixed bottom-0 left-0 right-0 z-40 glass-strong border-t border-white/8">
+        <div className="mx-auto max-w-[1480px] px-4 py-3 md:px-6">
+          <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-4">
+            <VoiceInputPanel
+              value={voiceText}
+              sessionId={sessionId}
+              isListening={speechRecognition.isListening}
+              isSubmitting={isVoiceSubmitting}
+              isSpeechSupported={speechRecognition.isSupported}
+              speechError={speechRecognition.error}
+              submitError={voiceSubmitError}
+              onChange={setVoiceText}
+              onStartListening={speechRecognition.start}
+              onStopListening={speechRecognition.stop}
+              onSubmit={handleVoiceSubmit}
+            />
+            <TranscriptPanel
+              finalText={voiceText}
+              interimText={speechRecognition.interimTranscript}
+              isListening={speechRecognition.isListening}
+            />
+            <AssistantReplyPanel
+              response={voiceResponse}
+              isSubmitting={isVoiceSubmitting}
+              isTtsEnabled={textToSpeech.isEnabled}
+              isTtsSpeaking={textToSpeech.isSpeaking}
+              isTtsSupported={textToSpeech.isSupported}
+              onReplay={() => {
+                if (voiceResponse?.reply) {
+                  textToSpeech.speak(voiceResponse.reply, { force: true });
+                }
+              }}
+              onStopSpeaking={textToSpeech.stop}
+              onToggleTts={textToSpeech.setEnabled}
+            />
+            <ConfirmationPanel
+              response={voiceResponse}
+              isSubmitting={isVoiceSubmitting}
+              onSubmitReply={(text) => { void submitVoiceText(text); }}
+            />
+          </div>
+        </div>
       </div>
+
       <EventDrawer
         event={selectedEvent}
         open={isDrawerOpen}
@@ -282,7 +326,7 @@ export function DashboardPage() {
         onDismissNotice={() => setRealtimeNotice(null)}
         onDismissReminder={(id) =>
           setReminderNotifications((current) =>
-            current.filter((item) => item.id !== id),
+            current.filter((item) => item.id !== id)
           )
         }
         onOpenReminderEvent={handleOpenReminderEvent}
