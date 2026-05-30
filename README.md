@@ -219,7 +219,9 @@ VITE_WS_URL=ws://localhost:8000/ws
 - `APP_NAME`：后端应用名
 - `JWT_SECRET`：后端密钥，必填
 - `TIMEZONE`：默认时区
-- `OPENAI_API_KEY`：可选。配置后 NLU 会优先尝试 LLM 结构化解析，失败后回落到规则解析
+- `OPENAI_API_BASE_URL`：可选。OpenAI 或 OpenAI-compatible 中转站基础地址，默认 `https://api.openai.com/v1`
+- `OPENAI_API_KEY`：可选。OpenAI 或中转站提供的 API key；配置后 NLU 会优先尝试 LLM 结构化解析，失败后回落到规则解析
+- `API_BASE_URL` / `API_KEY`：兼容别名。若中转站文档使用这两个名称，后端也能读取
 - `WS_HEARTBEAT_INTERVAL`：WebSocket 心跳相关配置
 - `REMINDER_SCAN_INTERVAL`：提醒扫描间隔
 - `VITE_API_BASE_URL`：Docker 前端构建时写入的 API 地址

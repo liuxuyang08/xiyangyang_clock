@@ -61,7 +61,9 @@ GET /api/health
 - `REDIS_URL`
 - `JWT_SECRET`
 - `TIMEZONE`
+- `OPENAI_API_BASE_URL`
 - `OPENAI_API_KEY`
+- `API_BASE_URL` / `API_KEY`，作为 OpenAI-compatible 中转站常见命名的兼容别名
 - `WS_HEARTBEAT_INTERVAL`
 - `REMINDER_SCAN_INTERVAL`
 
@@ -73,6 +75,15 @@ REDIS_URL=redis://localhost:6379/0
 ```
 
 如果使用根目录 Docker Compose 启动 PostgreSQL / Redis，并且修改过根目录 `.env` 中的数据库账号、密码、端口或库名，需要同步更新 `backend/.env`。
+
+OpenAI 官方接口默认配置：
+
+```env
+OPENAI_API_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=
+```
+
+如果使用 OpenAI-compatible 中转站，将 `OPENAI_API_BASE_URL` 改为中转站提供的基础地址，将 `OPENAI_API_KEY` 改为中转站提供的 key。后端也兼容读取 `API_BASE_URL` 和 `API_KEY`。
 
 ## 数据库
 

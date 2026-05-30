@@ -35,8 +35,12 @@ class FakeClient:
     def __init__(self, payload: dict) -> None:
         self.payload = payload
         self.request_body: dict | None = None
+        self.request_headers: dict | None = None
+        self.request_url: str | None = None
 
     def post(self, *args, **kwargs) -> FakeResponse:
+        self.request_url = args[0] if args else kwargs.get("url")
+        self.request_headers = kwargs.get("headers")
         self.request_body = kwargs.get("json")
         return FakeResponse(self.payload)
 
@@ -91,6 +95,43 @@ class LLMParseServiceTestCase(unittest.TestCase):
         self.assertEqual(result.missing_slots, [])
         self.assertIsNotNone(fake_client.request_body)
         self.assertEqual(fake_client.request_body["response_format"], {"type": "json_object"})
+
+    def test_uses_custom_api_base_url(self) -> None:
+        content = json.dumps(
+            {
+                "intent": "help",
+                "confidence": 0.8,
+                "slots": {},
+                "missing_slots": [],
+            },
+            ensure_ascii=False,
+        )
+        fake_client = FakeClient(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": content,
+                        },
+                    },
+                ],
+            }
+        )
+        service = LLMParseService(
+            api_key="proxy-key",
+            api_base_url="https://proxy.example.com/v1/",
+            client=fake_client,
+        )
+
+        result = service.parse("甯姪")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            fake_client.request_url,
+            "https://proxy.example.com/v1/chat/completions",
+        )
+        self.assertIsNotNone(fake_client.request_headers)
+        self.assertEqual(fake_client.request_headers["Authorization"], "Bearer proxy-key")
 
 
 if __name__ == "__main__":

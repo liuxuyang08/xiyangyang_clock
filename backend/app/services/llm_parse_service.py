@@ -12,20 +12,44 @@ try:  # pragma: no cover - optional dependency in stripped local environments
 except ImportError:  # pragma: no cover - graceful fallback when httpx is absent
     httpx = None
 
-def _load_openai_api_key() -> str:
+DEFAULT_API_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_MODEL = "gpt-4o-mini"
+
+
+def _get_env_value(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.getenv(name, "")
+        if value:
+            return value
+    return default
+
+
+def _normalize_api_base_url(value: str) -> str:
+    normalized_value = value.strip().rstrip("/")
+    return normalized_value or DEFAULT_API_BASE_URL
+
+
+def _load_openai_api_config() -> tuple[str, str]:
+    env_base_url = _get_env_value("OPENAI_API_BASE_URL", "API_BASE_URL")
+    env_api_key = _get_env_value("OPENAI_API_KEY", "API_KEY")
+
     try:
         from app.core.config import get_settings
     except Exception:
-        return os.getenv("OPENAI_API_KEY", "")
+        return _normalize_api_base_url(env_base_url), env_api_key
 
     try:
-        return getattr(get_settings(), "openai_api_key", "") or os.getenv("OPENAI_API_KEY", "")
+        settings = get_settings()
     except Exception:
-        return os.getenv("OPENAI_API_KEY", "")
+        return _normalize_api_base_url(env_base_url), env_api_key
 
-
-LLM_API_URL = "https://api.openai.com/v1/chat/completions"
-DEFAULT_MODEL = "gpt-4o-mini"
+    api_base_url = (
+        getattr(settings, "openai_api_base_url", "")
+        or env_base_url
+        or DEFAULT_API_BASE_URL
+    )
+    api_key = getattr(settings, "openai_api_key", "") or env_api_key
+    return _normalize_api_base_url(api_base_url), api_key
 
 
 @dataclass(slots=True)
@@ -43,11 +67,16 @@ class LLMParseService:
     def __init__(
         self,
         api_key: str | None = None,
+        api_base_url: str | None = None,
         model: str = DEFAULT_MODEL,
         client: Any | None = None,
         timeout: float = 12.0,
     ) -> None:
-        self.api_key = api_key or _load_openai_api_key()
+        config_api_base_url, config_api_key = _load_openai_api_config()
+        self.api_key = config_api_key if api_key is None else api_key
+        self.api_base_url = _normalize_api_base_url(
+            config_api_base_url if api_base_url is None else api_base_url
+        )
         self.model = model
         self.client = client
         self.timeout = timeout
@@ -99,9 +128,10 @@ class LLMParseService:
         }
 
         try:
+            api_url = self._chat_completions_url()
             if self.client is not None:
                 response = self.client.post(
-                    LLM_API_URL,
+                    api_url,
                     headers=self._headers(),
                     json=request_body,
                     timeout=self.timeout,
@@ -110,7 +140,7 @@ class LLMParseService:
                 assert httpx is not None  # for type-checking and runtime safety
                 with httpx.Client(timeout=self.timeout) as client:
                     response = client.post(
-                        LLM_API_URL,
+                        api_url,
                         headers=self._headers(),
                         json=request_body,
                     )
@@ -214,6 +244,11 @@ class LLMParseService:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+
+    def _chat_completions_url(self) -> str:
+        if self.api_base_url.endswith("/chat/completions"):
+            return self.api_base_url
+        return f"{self.api_base_url}/chat/completions"
 
     def _parse_json_content(self, content: str) -> dict[str, Any] | None:
         text = content.strip()

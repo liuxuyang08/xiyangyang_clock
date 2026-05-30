@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,7 +21,14 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="", validation_alias="REDIS_URL")
     jwt_secret: str = Field(default="", validation_alias="JWT_SECRET")
     timezone: str = Field(default="Asia/Shanghai", validation_alias="TIMEZONE")
-    openai_api_key: str = Field(default="", validation_alias="OPENAI_API_KEY")
+    openai_api_base_url: str = Field(
+        default="https://api.openai.com/v1",
+        validation_alias=AliasChoices("OPENAI_API_BASE_URL", "API_BASE_URL"),
+    )
+    openai_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("OPENAI_API_KEY", "API_KEY"),
+    )
     ws_heartbeat_interval: int = Field(
         default=30,
         validation_alias="WS_HEARTBEAT_INTERVAL",
@@ -37,4 +44,3 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
-

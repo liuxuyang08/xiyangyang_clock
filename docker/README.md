@@ -163,11 +163,16 @@ docker compose up --build
 - `APP_NAME`
 - `JWT_SECRET`
 - `TIMEZONE`
+- `OPENAI_API_BASE_URL`
 - `OPENAI_API_KEY`
+- `API_BASE_URL`
+- `API_KEY`
 - `WS_HEARTBEAT_INTERVAL`
 - `REMINDER_SCAN_INTERVAL`
 - `VITE_API_BASE_URL`
 - `VITE_WS_URL`
+
+`OPENAI_API_BASE_URL` / `OPENAI_API_KEY` 用于 OpenAI 或 OpenAI-compatible 中转站。`API_BASE_URL` / `API_KEY` 是兼容别名，方便直接粘贴部分中转站提供的配置命名。
 
 如果修改 `FRONTEND_PORT`，需要同步修改：
 
