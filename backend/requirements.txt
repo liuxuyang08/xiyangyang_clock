@@ -1,6 +1,6 @@
 # Web framework and ASGI server
 fastapi
-uvicorn
+uvicorn[standard]
 
 # Async database stack for FastAPI + SQLAlchemy
 sqlalchemy[asyncio]
@@ -17,4 +17,3 @@ python-dateutil
 APScheduler
 python-dotenv
 httpx
-

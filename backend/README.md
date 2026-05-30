@@ -1,23 +1,22 @@
 # backend
 
-FastAPI 后端目录。
+FastAPI 后端目录，负责日程、提醒、语音命令解析、多轮对话状态、WebSocket 实时推送和提醒调度。
 
-当前阶段已包含配置管理、健康检查、PostgreSQL 异步连接、Redis 统一 client 管理、核心 SQLAlchemy 模型、初始化建表脚本、Repository 层、Pydantic schema、`CalendarService`、`ReminderService`、`ConflictService`、`TimeParser`、`RecurrenceParser`、规则版 `NLUService` 实体抽取、LLM 结构化解析增强封装、事件 REST API 和提醒 REST API。
+## 技术栈
 
-尚未实现统一语音入口、提醒调度、WebSocket 和前端。
+- FastAPI
+- Uvicorn，依赖使用 `uvicorn[standard]`，用于提供 WebSocket 协议支持
+- SQLAlchemy async
+- asyncpg
+- PostgreSQL
+- Redis
+- Pydantic / pydantic-settings
+- dateparser
+- python-dateutil
+- APScheduler
+- httpx
 
-## 依赖配置
-
-本项目当前采用单一依赖清单：
-
-- `backend/requirements.txt`
-
-数据库访问方案采用异步栈：
-
-- `SQLAlchemy[asyncio]`
-- `asyncpg`
-
-## 安装依赖
+## 快速启动
 
 在 `backend/` 目录下执行：
 
@@ -26,12 +25,32 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+Copy-Item .env.example .env
+python -m scripts.init_db
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+启动后访问：
+
+```http
+GET /api/health
+```
+
+返回示例：
+
+```json
+{
+  "status": "ok",
+  "environment": "dev",
+  "database": "available",
+  "redis": "available"
+}
 ```
 
 ## 配置文件
 
 - `.env.example`：环境变量示例
-- `.env`：本地实际配置文件，建议由 `.env.example` 复制生成
+- `.env`：本地实际配置文件，建议从 `.env.example` 复制生成
 - `app/core/config.py`：配置读取入口，使用 `pydantic-settings`
 
 支持的环境变量：
@@ -46,11 +65,14 @@ pip install -r requirements.txt
 - `WS_HEARTBEAT_INTERVAL`
 - `REMINDER_SCAN_INTERVAL`
 
-复制配置：
+本地默认数据库和 Redis 配置：
 
-```powershell
-Copy-Item .env.example .env
+```env
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/voice_calendar
+REDIS_URL=redis://localhost:6379/0
 ```
+
+如果使用根目录 Docker Compose 启动 PostgreSQL / Redis，并且修改过根目录 `.env` 中的数据库账号、密码、端口或库名，需要同步更新 `backend/.env`。
 
 ## 数据库
 
@@ -58,12 +80,15 @@ Copy-Item .env.example .env
 
 - `app/db/base.py`：SQLAlchemy `Base`
 - `app/db/session.py`：异步 `engine`、`SessionLocal`、数据库会话 dependency、数据库健康检查
+- `scripts/init_db.py`：建表和开发演示数据初始化脚本
 
-当前项目还没有引入 Alembic。为了避免重复维护多套互相冲突的建表方式，现阶段只提供一个初始化脚本：
+当前项目还没有引入 Alembic。现阶段通过以下命令创建表：
 
-- `scripts/init_db.py`
+```powershell
+python -m scripts.init_db
+```
 
-该脚本会基于 SQLAlchemy `Base.metadata.create_all` 创建当前核心表：
+该脚本会基于 `Base.metadata.create_all` 创建以下表：
 
 - `users`
 - `events`
@@ -71,13 +96,16 @@ Copy-Item .env.example .env
 - `conversation_states`
 - `voice_commands`
 
-初始化数据库：
+脚本还会幂等插入一个开发演示用户：
 
-```powershell
-python -m scripts.init_db
+```text
+id: u001
+nickname: Demo User
+timezone: Asia/Shanghai
+default_reminder_minutes: 15
 ```
 
-该脚本只创建尚不存在的表，不实现迁移版本管理，也不写入业务数据。
+前端当前默认使用 `user_id = "u001"`。如果数据库中缺少该用户，创建日程时会触发 `events_user_id_fkey` 外键错误，因此初始化数据库后必须确保该用户存在。
 
 ## Redis
 
@@ -85,24 +113,22 @@ Redis 统一 client 管理位于：
 
 - `app/core/redis.py`
 
-当前能力：
+当前用途：
 
-- 读取 `REDIS_URL`
-- 统一创建 Redis async client
-- 提供 Redis 健康检查
-- 在 FastAPI lifespan 结束时关闭 Redis client
+- Redis 健康检查
+- 多轮对话状态临时缓存
+- WebSocket 在线状态缓存
+- FastAPI lifespan 结束时统一关闭 Redis client
 
-后续 `conversation_state` 临时缓存和 WebSocket 在线状态都应复用这里的统一入口，不要在业务代码中散乱创建 Redis 连接。
-当前多轮对话状态服务使用以下 Redis key：
+多轮对话状态使用的 Redis key：
 
 - `voice:session:{session_id}`
 - `voice:user:{user_id}:state`
 - `voice:user:{user_id}:pending_confirm`
 
-TTL 建议：
+WebSocket 在线状态使用的 Redis key：
 
-- 会话状态默认 15 分钟到 30 分钟
-- 待确认状态默认 10 分钟到 15 分钟
+- `voice:ws:online:{user_id}`
 
 ## 模型
 
@@ -116,6 +142,7 @@ TTL 建议：
 
 模型约定：
 
+- `Event.user_id`、`Reminder.user_id`、`ConversationState.user_id`、`VoiceCommand.user_id` 均通过外键关联 `users.id`
 - `Event` 删除采用软删除，通过 `status = "deleted"` 和 `deleted_at` 表达
 - `participants`、`recurrence_rule`、`slots`、`missing_slots`、`candidate_events`、`entities` 使用 JSON 字段
 - 已建立核心查询索引，包括事件时间查询、提醒到期查询、会话状态查询和语音命令日志查询
@@ -167,7 +194,7 @@ Pydantic schema 位于 `app/schemas/`：
 }
 ```
 
-API 后续不应直接返回 ORM 对象，应转换为 schema 或结构化响应。
+API 不应直接返回 ORM 对象，应转换为 schema 或结构化响应。
 
 ## Service 层
 
@@ -183,130 +210,33 @@ Service 位于 `app/services/`。
 - `DialogService`
 - `TimeParser`
 - `RecurrenceParser`
+- `ReminderScheduler`
+- `WebSocketManager`
+- `VoiceCommandLogService`
 
-`CalendarService` 支持：
+核心职责：
 
-- `create_event`
-- `list_events_by_range`
-- `get_event`
-- `update_event`
-- `soft_delete_event`
-- `search_candidate_events`
-
-当前行为：
-
-- 默认只处理 `active` 事件
-- 删除必须软删除
-- 时间范围查询按 `start_time` 排序
-- 更新事件时自动更新 `updated_at`
-
-`ReminderService` 支持：
-
-- `create_reminder`
-- `list_reminders`
-- `cancel_reminder`
-- `cancel_event_reminders`
-- `list_due_pending_reminders`
-- `mark_sent`
-- `mark_failed`
-
-当前行为：
-
-- `remind_time` 不能早于当前时间，除非显式启用测试标记
-- 取消日程时可以取消该日程下所有 `pending` 提醒
-- 提醒状态至少覆盖 `pending`、`sent`、`cancelled`、`failed`
-
-`ConflictService` 支持：
-
-- 判断两个时间区间是否冲突
-- 根据 `user_id`、`start_time`、`end_time` 查询冲突事件
-- 修改事件时排除当前事件自身
-
-当前行为：
-
-- 冲突规则为 `new_start < existing_end` 且 `new_end > existing_start`
-- 只返回冲突事件摘要，不做确认逻辑
-- 返回内容包含冲突事件 `id`、`title`、`start_time`、`end_time`
-
-`TimeParser` 支持：
-
-- 输入 `text`、`base_time`、`timezone`
-- 优先使用自定义中文规则解析
-- 使用 `dateparser` 作为兜底解析
-- 输出结构化 `TimeParseResult`
-- 保留兼容字段 `datetime`
-- 对区间表达返回 `start_datetime`、`end_datetime`、`is_range`
-- 对已过去的时间返回 `is_past=True` 并标记需要追问
-- 对模糊表达返回 `ambiguous=True`
-
-当前支持的基础表达：
-
-- `今天`
-- `明天`
-- `后天`
-- `本周一` 到 `本周日`
-- `下周一` 到 `下周日`
-- `上午十点`
-- `下午三点`
-- `晚上八点半`
-- `周五下午三点`
-- `下周三上午十点半`
-- `明天下午三点`
-- `后天上午九点`
-- `一小时后`
-- `半小时后`
-
-当前行为：
-
-- 只说 `月底前`、`周末`、`睡前`、`上班前` 等表达时，返回 `ambiguous=True`
-- 可解析但已经过去的时间，会返回 `is_past=True`，供业务层追问
-- 缺少明确钟点的表达仍会返回 `need_followup=True`
-- 不创建日程，不做 NLU
-
-`NLUService` 支持：
-
-- 规则版意图识别与实体抽取
-- 当 `OPENAI_API_KEY` 可用时，先尝试 LLM 结构化解析，再在失败时回落到规则解析
-- 输出 `intent`、`confidence`、`slots`、`missing_slots`
-- 当前识别 `create_event`、`query_event`、`update_event`、`delete_event`、`create_reminder`、`cancel_reminder`、`confirm`、`deny`、`undo`、`help`
-- 当前抽取 `title`、`date_text`、`time_text`、`start_time`、`end_time`、`location`、`participants`、`reminder_offset_minutes`、`recurrence_text`、`target_event`
-- 时间解析可调用 `TimeParser`，时间输出使用 ISO 字符串
-- 抽取不到必填字段时返回 `missing_slots`
-- 目前优先覆盖常见中文表达，例如“明天下午三点提醒我交项目文档”“下周三上午十点和王老师在图书馆开会”“每周一上午九点提醒我开例会”“把明天上午的会议改到下午三点”“删除明天的健身”
-- LLM 封装只做结构化解析，不执行任何业务操作
-- 不把业务操作交给大模型执行
-
-`DialogService` 支持：
-
-- `get_current_state`
-- `create_pending_state`
-- `update_state_slots`
-- `set_candidates`
-- `set_need_confirm`
-- `complete_state`
-- `cancel_state`
-- `expire_state`
-
-当前行为：
-
-- 同时读取 Redis 临时状态和 `conversation_states` 持久化记录
-- Redis key 遵循 `voice:session:{session_id}`、`voice:user:{user_id}:state`、`voice:user:{user_id}:pending_confirm`
-- 状态具备 TTL
-- 短句 `确认`、`取消`、`不要了`、`是的` 等优先按当前上下文解释
-- 不执行业务执行，不直接创建日程或提醒
-
-`RecurrenceParser` 支持：
-
-- 输入中文重复表达，输出 `recurrence_rule` 兼容结构和标准 `RRULE:` 字符串
-- 当前支持 `每天`、`每周一`、`每周三下午三点`、`每月 1 号`、`工作日`
-- 只负责解析重复规则，不生成重复事件实例
-- 可直接将结果保存到 `Event.recurrence_rule`
+- `CalendarService`：创建、查询、更新、软删除日程
+- `ReminderService`：创建、查询、取消和标记提醒
+- `ConflictService`：检测时间区间冲突
+- `TimeParser`：解析中文时间表达，识别模糊和过去时间
+- `RecurrenceParser`：解析中文重复规则，输出兼容结构和 `RRULE:` 字符串
+- `NLUService`：规则版意图识别与实体抽取，可选 LLM 结构化解析
+- `LLMParseService`：封装大模型结构化解析，不执行业务操作
+- `DialogService`：管理多轮对话状态、候选项和确认流程
+- `ReminderScheduler`：扫描到期提醒并通过 WebSocket 推送
+- `WebSocketManager`：管理用户会话连接、心跳和广播
+- `VoiceCommandLogService`：记录语音命令处理过程
 
 ## API 路由
 
 路由位于 `app/api/`。
 
-当前已实现事件 REST API：
+健康检查：
+
+- `GET /api/health`
+
+事件 API：
 
 - `GET /api/events`
 - `POST /api/events`
@@ -314,61 +244,126 @@ Service 位于 `app/services/`。
 - `PATCH /api/events/{event_id}`
 - `DELETE /api/events/{event_id}`
 
-接口约定：
-
-- `GET /api/events` 支持 `user_id`、`start`、`end` 查询参数
-- `DELETE /api/events/{event_id}` 执行软删除
-- 返回统一使用 `ApiResponse`
-- 路由层只负责参数接收、服务调用和 schema 转换，不堆业务逻辑
-
-当前已实现提醒 REST API：
+提醒 API：
 
 - `GET /api/reminders`
 - `POST /api/reminders`
 - `PATCH /api/reminders/{reminder_id}`
 - `DELETE /api/reminders/{reminder_id}`
 
-接口约定：
+语音命令 API：
 
-- `GET /api/reminders` 支持 `user_id` 和 `status` 查询参数
-- `DELETE /api/reminders/{reminder_id}` 不物理删除，改为 `cancelled`
-- 返回统一使用 `ApiResponse`
-- 路由层只负责参数接收、服务调用和 schema 转换，不实现调度逻辑
+- `POST /api/voice/command`
 
-## 启动 FastAPI
+WebSocket：
 
-在 `backend/` 目录下启动：
+- `/ws?user_id={user_id}&session_id={session_id}`
 
-```powershell
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-## 健康检查
-
-启动后可访问：
-
-```http
-GET /api/health
-```
-
-返回示例：
+WebSocket 客户端可以发送心跳：
 
 ```json
 {
-  "status": "ok",
-  "environment": "dev",
-  "database": "available",
-  "redis": "available"
+  "type": "heartbeat",
+  "user_id": "u001",
+  "session_id": "session-1",
+  "client_time": "2026-05-30T12:00:00+08:00"
 }
 ```
 
-该接口只返回环境名和依赖连通状态，不暴露数据库地址、密钥或其他敏感配置。
+## 测试
+
+在 `backend/` 目录下执行：
+
+```powershell
+.venv\Scripts\Activate.ps1
+python -m unittest discover tests
+```
+
+如果还没有创建虚拟环境，先执行“快速启动”中的依赖安装步骤。
+
+## Docker 使用
+
+推荐从项目根目录使用 Docker Compose 启动完整环境：
+
+```powershell
+Copy-Item .env.example .env
+docker compose up --build
+```
+
+单独重建后端镜像：
+
+```powershell
+docker compose build api
+docker compose up -d api
+```
+
+重新执行数据库初始化：
+
+```powershell
+docker compose run --build --rm db-init
+```
+
+## 常见问题
+
+### 创建日程时报 `events_user_id_fkey`
+
+原因是 `events.user_id` 外键要求用户必须先存在于 `users` 表。前端默认使用 `u001`，需要执行：
+
+```powershell
+python -m scripts.init_db
+```
+
+Docker 模式下执行：
+
+```powershell
+docker compose run --build --rm db-init
+```
+
+### WebSocket 一直重连
+
+先检查后端日志：
+
+```powershell
+docker compose logs --tail 80 api
+```
+
+如果看到：
+
+```text
+No supported WebSocket library detected.
+Please use "pip install 'uvicorn[standard]'"
+```
+
+说明当前运行环境缺少 WebSocket 协议依赖。当前 `requirements.txt` 已使用 `uvicorn[standard]`，重新安装依赖或重建后端镜像即可：
+
+```powershell
+pip install -r requirements.txt
+```
+
+或：
+
+```powershell
+docker compose build api
+docker compose up -d api
+```
+
+正常连接时日志应出现：
+
+```text
+WebSocket /ws?user_id=u001&session_id=... [accepted]
+connection open
+```
 
 ## 目录结构
 
 ```text
 backend/
   app/
+    api/
+      events.py
+      reminders.py
+      voice.py
+      ws.py
     core/
       config.py
       redis.py
@@ -386,9 +381,6 @@ backend/
       reminder_repository.py
       conversation_repository.py
       voice_command_repository.py
-    api/
-      events.py
-      reminders.py
     schemas/
       common.py
       event.py
@@ -402,38 +394,27 @@ backend/
       llm_parse_service.py
       nlu_service.py
       recurrence_parser.py
+      reminder_scheduler.py
       reminder_service.py
       time_parser.py
+      voice_command_log_service.py
+      websocket_manager.py
     main.py
   scripts/
     init_db.py
   tests/
-    test_dialog_service.py
-    test_llm_parse_service.py
-    test_nlu_service.py
-    test_time_parser.py
-    test_recurrence_parser.py
   .env.example
   requirements.txt
   README.md
 ```
 
-## 后续开发
-
-建议顺序：
-
-1. 实现 `/api/voice/command`
-2. 实现提醒调度 worker
-3. 实现 WebSocket 推送
-4. 补充测试与 Docker 编排
-
 ## 文档维护约定
 
 后续每次后端开发都需要同步更新本文档。
 
-- 新增依赖时，更新“依赖配置”
+- 新增依赖时，更新“技术栈”和“常见问题”
 - 新增环境变量时，更新“配置文件”
 - 新增表、索引、初始化方式时，更新“数据库”
-- 新增 Redis 用法时，更新“Redis”
+- 新增 Redis key 时，更新“Redis”
 - 新增模型、Repository、Schema、Service、API 时，更新对应章节
 - 新增启动、测试、部署命令时，更新对应使用说明

@@ -1,10 +1,14 @@
 import asyncio
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.config import get_settings
 from app.db.base import Base
+from app.models.user import User
 from app import models  # noqa: F401
+
+DEFAULT_DEMO_USER_ID = "u001"
 
 
 async def init_db() -> None:
@@ -20,8 +24,26 @@ async def init_db() -> None:
     try:
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(seed_default_demo_user)
     finally:
         await engine.dispose()
+
+
+def seed_default_demo_user(connection) -> None:
+    existing_user_id = connection.execute(
+        select(User.id).where(User.id == DEFAULT_DEMO_USER_ID)
+    ).scalar_one_or_none()
+    if existing_user_id is not None:
+        return
+
+    connection.execute(
+        User.__table__.insert().values(
+            id=DEFAULT_DEMO_USER_ID,
+            nickname="Demo User",
+            timezone="Asia/Shanghai",
+            default_reminder_minutes=15,
+        )
+    )
 
 
 def main() -> None:
@@ -30,9 +52,8 @@ def main() -> None:
     except Exception as exc:
         raise SystemExit(f"Database initialization failed: {exc}") from exc
 
-    print("Database tables initialized.")
+    print("Database tables initialized and demo user seeded.")
 
 
 if __name__ == "__main__":
     main()
-
