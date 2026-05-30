@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Any
 
 from sqlalchemy import select
@@ -69,4 +71,3 @@ class VoiceCommandRepository:
         )
         result = await self.session.scalars(statement)
         return list(result.all())
-

@@ -57,6 +57,7 @@
 - 多轮对话状态服务：`DialogService`
 - 事件 REST API：`GET/POST/PATCH/DELETE /api/events`
 - 提醒 REST API：`GET/POST/PATCH/DELETE /api/reminders`
+- Docker 本地部署配置：PostgreSQL、Redis、后端 API、前端 nginx 服务和数据库初始化任务
 
 ## 当前未实现
 
@@ -66,7 +67,6 @@
 - 多轮对话业务编排
 - 提醒调度 worker
 - WebSocket 推送
-- Docker 编排
 - 自动化测试
 
 ## 后端快速开始
@@ -120,6 +120,57 @@ GET /api/health
   "redis": "available"
 }
 ```
+
+## Docker 本地启动
+
+Docker 模式使用根目录 `.env`；本地开发仍使用 `backend/.env` 和 `frontend/.env`，两种方式互不覆盖。
+
+复制环境变量示例：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+启动前请编辑 `.env`，至少替换：
+
+- `POSTGRES_PASSWORD`
+- `JWT_SECRET`
+
+启动完整本地环境：
+
+```powershell
+docker compose up --build
+```
+
+如果本机 Docker CLI 不支持 `docker compose` 子命令，可以使用旧版命令：
+
+```powershell
+docker-compose up --build
+```
+
+服务地址：
+
+- 前端：http://localhost:5173
+- 后端健康检查：http://localhost:8000/api/health
+- PostgreSQL：localhost:5432
+- Redis：localhost:6379
+
+`db-init` 服务会在 API 启动前执行 `python -m scripts.init_db`，用于创建数据库表。提醒调度器当前随后端 API 的 FastAPI lifespan 启动，本项目暂未拆出独立 scheduler/worker 容器，避免本地单机环境重复扫描提醒。
+
+停止服务：
+
+```powershell
+docker compose down
+```
+
+如需清空 Docker 数据卷并重建数据库：
+
+```powershell
+docker compose down -v
+docker compose up --build
+```
+
+如果本机 5173 端口已被 Vite dev server 占用，可以在根目录 `.env` 中调整 `FRONTEND_PORT`，同时同步调整 `VITE_API_BASE_URL` 和 `VITE_WS_URL` 后重新构建前端镜像。
 
 ## 开发顺序
 

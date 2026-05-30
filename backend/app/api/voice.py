@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.db.session import get_db_session
 from app.schemas.event import EventCreate, EventUpdate
 from app.schemas.reminder import ReminderCreate
@@ -122,6 +123,9 @@ async def handle_voice_command(
 
         intent = _resolve_intent(nlu_result, current_state)
         slots = _merge_slots(current_state, nlu_result)
+        if intent == "create_reminder":
+            intent = "create_event"
+            slots.setdefault("reminder_offset_minutes", 0)
         time_parse_details = _normalize_time_slots(
             slots=slots,
             base_time=payload.client_time,
@@ -1408,6 +1412,7 @@ async def _handle_pending_update_event(
         session_id=payload.session_id,
     )
     await session.commit()
+    await _refresh_models(session, updated_event, completed_state)
 
     event_data = _model_to_dict(updated_event, EVENT_RESPONSE_FIELDS)
     entities = _jsonable(
@@ -1574,6 +1579,7 @@ async def _execute_update_event_from_state(
         session_id=payload.session_id,
     )
     await session.commit()
+    await _refresh_models(session, updated_event, completed_state)
 
     event_data = _model_to_dict(updated_event, EVENT_RESPONSE_FIELDS)
     entities = _jsonable(
@@ -1773,6 +1779,7 @@ async def _handle_pending_delete_event(
         session_id=payload.session_id,
     )
     await session.commit()
+    await _refresh_models(session, deleted_event, completed_state, *cancelled_reminders)
 
     deleted_event_data = _model_to_dict(deleted_event, EVENT_RESPONSE_FIELDS) if deleted_event is not None else None
     cancelled_reminder_data = [
@@ -2009,6 +2016,16 @@ def _parse_int_slot(value: Any, default: int = 0) -> int:
 
 def _model_to_dict(model: Any, fields: list[str]) -> dict[str, Any]:
     return _jsonable({field: getattr(model, field, None) for field in fields})
+
+
+async def _refresh_models(session: AsyncSession, *models: Any) -> None:
+    refresh = getattr(session, "refresh", None)
+    if refresh is None:
+        return
+
+    for model in models:
+        if model is not None and hasattr(model, "_sa_instance_state"):
+            await refresh(model)
 
 
 def _is_pending_delete_state(state: Any | None) -> bool:
@@ -2571,6 +2588,26 @@ def _date_from_text(value: Any, base_date: date) -> date | None:
         return base_date + timedelta(days=1)
     if "后天" in text:
         return base_date + timedelta(days=2)
+    weekday_match = re.search(r"(本周|下周)?(?:周|星期)([一二三四五六日天])", text)
+    if weekday_match is not None:
+        prefix, weekday_text = weekday_match.groups()
+        weekday_index = {
+            "一": 0,
+            "二": 1,
+            "三": 2,
+            "四": 3,
+            "五": 4,
+            "六": 5,
+            "日": 6,
+            "天": 6,
+        }[weekday_text]
+        start_of_week = base_date - timedelta(days=base_date.weekday())
+        if prefix == "下周":
+            start_of_week += timedelta(days=7)
+        elif prefix is None:
+            days_until_target = (weekday_index - base_date.weekday()) % 7
+            return base_date + timedelta(days=days_until_target)
+        return start_of_week + timedelta(days=weekday_index)
 
     try:
         return date.fromisoformat(text[:10])
@@ -2582,6 +2619,9 @@ def _extract_date_hint_from_text(text: str) -> str | None:
     for value in ("今天", "明天", "后天"):
         if value in text:
             return value
+    match = re.search(r"(?:本周|下周)?(?:周|星期)[一二三四五六日天]", text)
+    if match is not None:
+        return match.group(0)
     return None
 
 
@@ -2706,6 +2746,7 @@ def _format_datetime_value_for_voice(value: Any) -> str:
         parsed = _parse_datetime_slot(value)
     except ValueError:
         return str(value)
+    parsed = _ensure_datetime_timezone(parsed, _voice_reply_timezone())
     return f"{parsed.month}月{parsed.day}日{_format_time_of_day(parsed)}"
 
 
@@ -2923,6 +2964,7 @@ def _format_candidate_time(candidate: Mapping[str, Any]) -> str:
     start_time = _event_data_start_time(candidate)
     if start_time is None:
         return ""
+    start_time = _ensure_datetime_timezone(start_time, _voice_reply_timezone())
     return f"{start_time.month}月{start_time.day}日{_format_time_of_day(start_time)}"
 
 
@@ -3109,6 +3151,8 @@ def _format_event_time_for_voice(
         return ""
 
     range_start = query_range["start_time"]
+    if isinstance(range_start, datetime) and range_start.tzinfo is not None:
+        start_time = _ensure_datetime_timezone(start_time, range_start.tzinfo)
     include_date = query_range["kind"] == "recent" or start_time.date() != range_start.date()
     date_text = f"{start_time.month}月{start_time.day}日" if include_date else ""
     return f"{date_text}{_format_time_of_day(start_time)}"
@@ -3199,7 +3243,15 @@ def _display_time_text(
     start_time = event_data.get("start_time")
     if isinstance(start_time, str):
         try:
-            return datetime.fromisoformat(start_time).strftime("%Y-%m-%d %H:%M")
+            parsed_start = _ensure_datetime_timezone(
+                datetime.fromisoformat(start_time),
+                _voice_reply_timezone(),
+            )
+            return parsed_start.strftime("%Y-%m-%d %H:%M")
         except ValueError:
             return start_time
     return "指定时间"
+
+
+def _voice_reply_timezone() -> ZoneInfo | fixed_timezone:
+    return _get_timezone(get_settings().timezone)

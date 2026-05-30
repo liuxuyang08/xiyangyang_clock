@@ -58,14 +58,31 @@ class TimeParserTestCase(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.datetime.isoformat(), "2026-06-03T10:30:00+08:00")
 
+    def test_parse_requested_voice_time_phrases(self) -> None:
+        base_time = datetime(2026, 5, 30, 12, 0, 0)
+
+        tomorrow_afternoon = self.parser.parse("明天下午三点", base_time, self.tz)
+        next_wednesday = self.parser.parse("下周三上午十点", base_time, self.tz)
+        next_thursday_afternoon = self.parser.parse("周四下午两点", base_time, self.tz)
+
+        self.assertTrue(tomorrow_afternoon.success)
+        self.assertEqual(tomorrow_afternoon.datetime.isoformat(), "2026-05-31T15:00:00+08:00")
+        self.assertTrue(next_wednesday.success)
+        self.assertEqual(next_wednesday.datetime.isoformat(), "2026-06-03T10:00:00+08:00")
+        self.assertTrue(next_thursday_afternoon.success)
+        self.assertEqual(next_thursday_afternoon.datetime.isoformat(), "2026-06-04T14:00:00+08:00")
+
     def test_parse_relative_duration(self) -> None:
         one_hour = self.parser.parse("一小时后", self.base_time, self.tz)
         half_hour = self.parser.parse("半小时后", self.base_time, self.tz)
+        one_minute = self.parser.parse("一分钟后", self.base_time, self.tz)
 
         self.assertTrue(one_hour.success)
         self.assertEqual(one_hour.datetime.isoformat(), "2026-05-29T16:00:00+08:00")
         self.assertTrue(half_hour.success)
         self.assertEqual(half_hour.datetime.isoformat(), "2026-05-29T15:30:00+08:00")
+        self.assertTrue(one_minute.success)
+        self.assertEqual(one_minute.datetime.isoformat(), "2026-05-29T15:01:00+08:00")
 
     def test_parse_ambiguous_expressions(self) -> None:
         for text in ["月底前", "周末", "睡前", "上班前"]:

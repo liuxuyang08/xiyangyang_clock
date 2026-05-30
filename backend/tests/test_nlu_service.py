@@ -33,6 +33,60 @@ class NLUServiceTestCase(unittest.TestCase):
             timezone=self.timezone,
         )
 
+    def test_requested_voice_scenarios_use_rule_parse(self) -> None:
+        base_time = datetime.fromisoformat("2026-05-30T12:00:00+08:00")
+
+        create_result = self.service.parse(
+            "明天下午三点提醒我交项目文档",
+            base_time=base_time,
+            timezone=self.timezone,
+        )
+        query_result = self.service.parse(
+            "我今天有什么安排",
+            base_time=base_time,
+            timezone=self.timezone,
+        )
+        delete_result = self.service.parse(
+            "删除明天的会议",
+            base_time=base_time,
+            timezone=self.timezone,
+        )
+        update_result = self.service.parse(
+            "把下周三的会改到周四下午两点",
+            base_time=base_time,
+            timezone=self.timezone,
+        )
+        missing_time_result = self.service.parse(
+            "提醒我交项目文档",
+            base_time=base_time,
+            timezone=self.timezone,
+        )
+
+        self.assertEqual(create_result.intent, "create_reminder")
+        self.assertEqual(create_result.slots["title"], "交项目文档")
+        self.assertEqual(create_result.slots["date_text"], "明天")
+        self.assertEqual(create_result.slots["time_text"], "下午三点")
+        self.assertEqual(create_result.slots["start_time"], "2026-05-31T15:00:00+08:00")
+        self.assertEqual(create_result.missing_slots, [])
+
+        self.assertEqual(query_result.intent, "query_event")
+        self.assertEqual(query_result.slots["date_text"], "今天")
+        self.assertEqual(query_result.slots["start_time"], "2026-05-30T00:00:00+08:00")
+
+        self.assertEqual(delete_result.intent, "delete_event")
+        self.assertEqual(delete_result.slots["target_event"], "会议")
+        self.assertEqual(delete_result.slots["date_text"], "明天")
+
+        self.assertEqual(update_result.intent, "update_event")
+        self.assertEqual(update_result.slots["target_event"], "会")
+        self.assertEqual(update_result.slots["date_text"], "周四")
+        self.assertEqual(update_result.slots["time_text"], "下午两点")
+        self.assertEqual(update_result.slots["start_time"], "2026-06-04T14:00:00+08:00")
+
+        self.assertEqual(missing_time_result.intent, "create_reminder")
+        self.assertEqual(missing_time_result.slots["title"], "交项目文档")
+        self.assertEqual(missing_time_result.missing_slots, ["start_time"])
+
     def test_extract_reminder_slots(self) -> None:
         result = self.parse("明天下午三点提醒我交项目文档")
 

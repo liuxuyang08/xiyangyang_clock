@@ -243,6 +243,15 @@ class TimeParser:
             target = base_time + timedelta(minutes=30)
             return self._finalize_exact_result(text, target, base_time)
 
+        match = re.fullmatch(r"([零〇一二两三四五六七八九十\d]{1,3})分钟后", text)
+        if match is not None:
+            minutes = self._parse_chinese_number(match.group(1))
+            if minutes is None:
+                return None
+
+            target = base_time + timedelta(minutes=minutes)
+            return self._finalize_exact_result(text, target, base_time)
+
         match = re.fullmatch(r"([零〇一二两三四五六七八九十\d]{1,3})小时后", text)
         if match is None:
             return None

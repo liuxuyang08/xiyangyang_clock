@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
@@ -67,7 +68,7 @@ class WebSocketReminderDispatcher:
                 "event_id": message.event_id,
                 "title": message.title,
                 "start_time": (
-                    message.event_start_time.isoformat()
+                    _format_message_datetime(message.event_start_time)
                     if message.event_start_time is not None
                     else None
                 ),
@@ -234,3 +235,17 @@ class ReminderScheduler:
         rollback = getattr(session, "rollback", None)
         if rollback is not None:
             await rollback()
+
+
+def _format_message_datetime(value: datetime) -> str:
+    settings = get_settings()
+    try:
+        target_timezone = ZoneInfo(settings.timezone)
+    except Exception:
+        target_timezone = timezone.utc
+
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        value = value.replace(tzinfo=target_timezone)
+    else:
+        value = value.astimezone(target_timezone)
+    return value.isoformat()

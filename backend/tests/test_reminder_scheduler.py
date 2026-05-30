@@ -44,7 +44,10 @@ def install_import_stubs() -> dict[str, ModuleType | None]:
     app_module = ModuleType("app")
     app_core_module = ModuleType("app.core")
     app_core_config_module = ModuleType("app.core.config")
-    app_core_config_module.get_settings = lambda: SimpleNamespace(reminder_scan_interval=60)
+    app_core_config_module.get_settings = lambda: SimpleNamespace(
+        reminder_scan_interval=60,
+        timezone="Asia/Shanghai",
+    )
     app_db_module = ModuleType("app.db")
     app_db_session_module = ModuleType("app.db.session")
     app_db_session_module.SessionLocal = None

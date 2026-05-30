@@ -174,6 +174,45 @@ class DialogServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.status, "need_confirm")
         self.assertEqual(state.pending_intent, "delete_event")
 
+    async def test_short_cancel_prefers_pending_confirm_context(self) -> None:
+        await self.service.create_pending_state(
+            user_id=self.user_id,
+            session_id=self.session_id,
+            pending_intent="delete_event",
+            slots={"target_event": "会议"},
+        )
+        await self.service.set_need_confirm(
+            user_id=self.user_id,
+            session_id=self.session_id,
+        )
+
+        stale_payload = json.dumps(
+            {
+                "id": "stale",
+                "user_id": self.user_id,
+                "session_id": self.session_id,
+                "pending_intent": "create_event",
+                "slots": {"title": "交项目文档"},
+                "missing_slots": ["start_time"],
+                "candidate_events": [],
+                "status": "need_more_info",
+                "expires_at": None,
+                "updated_at": "2026-05-29T00:00:00+00:00",
+            },
+            ensure_ascii=False,
+        )
+        self.redis.store["voice:session:session-1"] = stale_payload
+
+        state = await self.service.get_current_state(
+            user_id=self.user_id,
+            session_id=self.session_id,
+            text="取消",
+        )
+
+        self.assertIsNotNone(state)
+        self.assertEqual(state.status, "need_confirm")
+        self.assertEqual(state.pending_intent, "delete_event")
+
     async def test_cancel_state_marks_database_and_clears_redis(self) -> None:
         await self.service.create_pending_state(
             user_id=self.user_id,

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Any
 
 from sqlalchemy import select
@@ -57,4 +59,3 @@ class ConversationRepository:
         )
         result = await self.session.scalars(statement)
         return result.first()
-
