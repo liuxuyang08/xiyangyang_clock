@@ -1,4 +1,8 @@
-import type { DatesSetArg, EventClickArg } from "@fullcalendar/core";
+import type {
+  DatesSetArg,
+  EventClickArg,
+  EventContentArg,
+} from "@fullcalendar/core";
 import FullCalendar from "@fullcalendar/react";
 import { AlertCircle, CalendarClock, Loader2, RefreshCcw } from "lucide-react";
 
@@ -18,6 +22,7 @@ import type { CalendarEvent, CalendarVisibleRange } from "@/types/event";
 type CalendarPanelProps = {
   events: FullCalendarEventInput[];
   error: string | null;
+  highlightedEventId: string | null;
   isLoading: boolean;
   onEventSelect: (event: CalendarEvent) => void;
   onRangeChange: (range: CalendarVisibleRange) => void;
@@ -27,6 +32,7 @@ type CalendarPanelProps = {
 export function CalendarPanel({
   events,
   error,
+  highlightedEventId,
   isLoading,
   onEventSelect,
   onRangeChange,
@@ -46,6 +52,12 @@ export function CalendarPanel({
     if (event) {
       onEventSelect(event);
     }
+  }
+
+  function getEventClassNames(arg: EventContentArg) {
+    return arg.event.id === highlightedEventId
+      ? ["calendar-event-highlighted"]
+      : [];
   }
 
   return (
@@ -110,6 +122,7 @@ export function CalendarPanel({
             editable={false}
             events={events}
             datesSet={handleDatesSet}
+            eventClassNames={getEventClassNames}
             eventClick={handleEventClick}
           />
         </div>

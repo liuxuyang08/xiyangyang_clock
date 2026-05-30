@@ -137,6 +137,13 @@ body {
   box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 35%, transparent);
 }
 
+.calendar-shell .fc-event.calendar-event-highlighted {
+  box-shadow:
+    0 0 0 2px var(--background),
+    0 0 0 5px color-mix(in oklch, var(--ring) 55%, transparent);
+  transform: translateY(-1px);
+}
+
 .calendar-shell .fc-col-header-cell,
 .calendar-shell .fc-timegrid-slot-label,
 .calendar-shell .fc-daygrid-day-number {

@@ -2,8 +2,19 @@ import { CalendarDays } from "lucide-react";
 
 import { Separator } from "@/components/ui/separator";
 import { WebSocketStatusIndicator } from "@/components/voice/websocket-status-indicator";
+import type { WebSocketConnectionStatus } from "@/types/realtime";
 
-export function WorkspaceHeader() {
+type WorkspaceHeaderProps = {
+  websocketError: string | null;
+  websocketStatus: WebSocketConnectionStatus;
+  onReconnectWebSocket: () => void;
+};
+
+export function WorkspaceHeader({
+  websocketError,
+  websocketStatus,
+  onReconnectWebSocket,
+}: WorkspaceHeaderProps) {
   return (
     <header className="border-b bg-background">
       <div className="mx-auto flex max-w-[1480px] flex-col gap-3 px-4 py-4 md:flex-row md:items-center md:justify-between md:px-6">
@@ -23,7 +34,11 @@ export function WorkspaceHeader() {
         <div className="hidden md:block">
           <Separator orientation="vertical" className="h-7" />
         </div>
-        <WebSocketStatusIndicator />
+        <WebSocketStatusIndicator
+          error={websocketError}
+          status={websocketStatus}
+          onReconnect={onReconnectWebSocket}
+        />
       </div>
     </header>
   );
