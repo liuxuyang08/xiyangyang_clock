@@ -146,4 +146,8 @@ class ReminderService:
         if reminder.status in {"sent", "cancelled"}:
             return reminder
 
-        return await self.reminder_repository.update_status(reminder, "failed")
+        return await self.reminder_repository.update_status(
+            reminder,
+            "failed",
+            error_message=error_message,
+        )

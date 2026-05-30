@@ -1,7 +1,40 @@
 # frontend
 
-前端预留目录。
+React + Vite frontend for Xiyangyang Clock.
 
-当前不初始化 React，也不放置业务实现代码。
-后续会在这里放置前端工程、页面组件、样式、静态资源和前端构建配置。
+## Stack
 
+- React
+- TypeScript
+- Vite
+- shadcn/ui compatible project structure
+- FullCalendar
+- Tailwind CSS
+
+## Environment
+
+Copy `.env.example` to `.env` for local development.
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Required variables:
+
+```env
+VITE_API_BASE_URL=http://localhost:8000
+VITE_WS_URL=ws://localhost:8000/ws
+```
+
+## Local Development
+
+```powershell
+npm install
+npm run dev
+```
+
+Build check:
+
+```powershell
+npm run build
+```

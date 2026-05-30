@@ -21,6 +21,7 @@ backend/venv/
 __pycache__/
 *.py[cod]
 *$py.class
+*.tsbuildinfo
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -76,4 +77,3 @@ docker-compose.override.yml
 .DS_Store
 Thumbs.db
 desktop.ini
-

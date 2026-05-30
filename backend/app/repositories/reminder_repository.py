@@ -65,7 +65,14 @@ class ReminderRepository:
         result = await self.session.scalars(statement)
         return list(result.all())
 
-    async def update_status(self, reminder: Reminder, status: str) -> Reminder:
+    async def update_status(
+        self,
+        reminder: Reminder,
+        status: str,
+        error_message: str | None = None,
+    ) -> Reminder:
         reminder.status = status
+        if hasattr(reminder, "error_message"):
+            reminder.error_message = error_message if status == "failed" else None
         await self.session.flush()
         return reminder

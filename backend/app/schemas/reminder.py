@@ -26,4 +26,5 @@ class ReminderUpdate(SchemaModel):
 
 class ReminderRead(ReminderBase):
     id: str
+    error_message: str | None = None
     created_at: datetime

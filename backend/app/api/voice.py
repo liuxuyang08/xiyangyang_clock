@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, timezone as fixed_timezone
 from typing import Any
@@ -11,10 +12,11 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
-from app.schemas.event import EventCreate
+from app.schemas.event import EventCreate, EventUpdate
 from app.schemas.reminder import ReminderCreate
 from app.schemas.voice import VoiceCommandRequest, VoiceCommandResponse
 from app.services.calendar_service import CalendarService
+from app.services.conflict_service import ConflictService
 from app.services.dialog_service import DialogService
 from app.services.nlu_service import NLUResult, NLUService
 from app.services.reminder_service import ReminderService
@@ -30,7 +32,7 @@ REQUIRED_SLOTS_BY_INTENT = {
     "create_event": ["title", "start_time"],
     "create_reminder": ["title", "start_time"],
     "query_event": [],
-    "update_event": ["target_event", "start_time"],
+    "update_event": [],
     "delete_event": [],
     "cancel_reminder": ["target_event"],
     "unknown": ["intent"],
@@ -62,6 +64,12 @@ async def get_calendar_service(
     return CalendarService(session)
 
 
+async def get_conflict_service(
+    session: AsyncSession = Depends(get_db_session),
+) -> ConflictService:
+    return ConflictService(session)
+
+
 async def get_reminder_service(
     session: AsyncSession = Depends(get_db_session),
 ) -> ReminderService:
@@ -86,6 +94,7 @@ async def handle_voice_command(
     session: AsyncSession = Depends(get_db_session),
     dialog_service: DialogService = Depends(get_dialog_service),
     calendar_service: CalendarService = Depends(get_calendar_service),
+    conflict_service: ConflictService = Depends(get_conflict_service),
     reminder_service: ReminderService = Depends(get_reminder_service),
     nlu_service: NLUService = Depends(get_nlu_service),
     time_parser: TimeParser = Depends(get_time_parser),
@@ -144,6 +153,57 @@ async def handle_voice_command(
         )
         voice_command_id = voice_command_id or getattr(parsed_voice_command, "id", None)
 
+        if _is_pending_conflict_state(current_state):
+            pending_conflict_response = await _handle_pending_conflict_confirmation(
+                payload=payload,
+                session=session,
+                dialog_service=dialog_service,
+                current_state=current_state,
+                user_intent=nlu_result.intent,
+                nlu_result=nlu_result,
+                voice_command_id=voice_command_id,
+                calendar_service=calendar_service,
+                reminder_service=reminder_service,
+                voice_command_log_service=voice_command_log_service,
+            )
+            if pending_conflict_response is not None:
+                return pending_conflict_response
+
+        if _is_pending_delete_state(current_state):
+            pending_delete_response = await _handle_pending_delete_event(
+                payload=payload,
+                session=session,
+                dialog_service=dialog_service,
+                current_state=current_state,
+                user_intent=nlu_result.intent,
+                slots=slots,
+                nlu_result=nlu_result,
+                voice_command_id=voice_command_id,
+                calendar_service=calendar_service,
+                reminder_service=reminder_service,
+                voice_command_log_service=voice_command_log_service,
+            )
+            if pending_delete_response is not None:
+                return pending_delete_response
+
+        if _is_pending_update_state(current_state):
+            pending_update_response = await _handle_pending_update_event(
+                payload=payload,
+                session=session,
+                dialog_service=dialog_service,
+                current_state=current_state,
+                user_intent=nlu_result.intent,
+                slots=slots,
+                nlu_result=nlu_result,
+                voice_command_id=voice_command_id,
+                calendar_service=calendar_service,
+                conflict_service=conflict_service,
+                reminder_service=reminder_service,
+                voice_command_log_service=voice_command_log_service,
+            )
+            if pending_update_response is not None:
+                return pending_update_response
+
         if missing_slots:
             state = await dialog_service.create_pending_state(
                 user_id=payload.user_id,
@@ -174,12 +234,14 @@ async def handle_voice_command(
             return await _handle_create_event(
                 payload=payload,
                 session=session,
+                dialog_service=dialog_service,
                 intent=intent,
                 slots=slots,
                 nlu_result=nlu_result,
                 time_parse_details=time_parse_details,
                 voice_command_id=voice_command_id,
                 calendar_service=calendar_service,
+                conflict_service=conflict_service,
                 reminder_service=reminder_service,
                 voice_command_log_service=voice_command_log_service,
             )
@@ -187,6 +249,20 @@ async def handle_voice_command(
         if intent == "query_event":
             return await _handle_query_event(
                 payload=payload,
+                intent=intent,
+                slots=slots,
+                nlu_result=nlu_result,
+                time_parse_details=time_parse_details,
+                voice_command_id=voice_command_id,
+                calendar_service=calendar_service,
+                voice_command_log_service=voice_command_log_service,
+            )
+
+        if intent == "update_event":
+            return await _handle_update_event(
+                payload=payload,
+                session=session,
+                dialog_service=dialog_service,
                 intent=intent,
                 slots=slots,
                 nlu_result=nlu_result,
@@ -258,7 +334,58 @@ async def _handle_create_event(
     *,
     payload: VoiceCommandRequest,
     session: AsyncSession,
+    dialog_service: DialogService,
     intent: str,
+    slots: dict[str, Any],
+    nlu_result: NLUResult,
+    time_parse_details: dict[str, Any],
+    voice_command_id: str | None,
+    calendar_service: CalendarService,
+    conflict_service: ConflictService,
+    reminder_service: ReminderService,
+    voice_command_log_service: VoiceCommandLogService,
+) -> VoiceCommandResponse:
+    start_time = _parse_datetime_slot(slots["start_time"])
+    end_time = _parse_optional_datetime_slot(slots.get("end_time"))
+    conflict_end_time = _conflict_end_time(start_time=start_time, end_time=end_time)
+    conflicts = await conflict_service.list_conflicting_events(
+        user_id=payload.user_id,
+        start_time=start_time,
+        end_time=conflict_end_time,
+    )
+    conflict_data = _conflicts_to_data(conflicts)
+    if conflict_data:
+        return await _save_create_conflict_confirmation(
+            payload=payload,
+            session=session,
+            dialog_service=dialog_service,
+            intent=intent,
+            slots=slots,
+            nlu_result=nlu_result,
+            time_parse_details=time_parse_details,
+            voice_command_id=voice_command_id,
+            conflicts=conflict_data,
+            voice_command_log_service=voice_command_log_service,
+        )
+
+    return await _execute_create_event(
+        payload=payload,
+        session=session,
+        slots=slots,
+        nlu_result=nlu_result,
+        time_parse_details=time_parse_details,
+        voice_command_id=voice_command_id,
+        calendar_service=calendar_service,
+        reminder_service=reminder_service,
+        voice_command_log_service=voice_command_log_service,
+        conflicts=[],
+    )
+
+
+async def _execute_create_event(
+    *,
+    payload: VoiceCommandRequest,
+    session: AsyncSession,
     slots: dict[str, Any],
     nlu_result: NLUResult,
     time_parse_details: dict[str, Any],
@@ -266,10 +393,11 @@ async def _handle_create_event(
     calendar_service: CalendarService,
     reminder_service: ReminderService,
     voice_command_log_service: VoiceCommandLogService,
+    conflicts: list[dict[str, Any]] | None = None,
+    dialog_service: DialogService | None = None,
 ) -> VoiceCommandResponse:
     start_time = _parse_datetime_slot(slots["start_time"])
     end_time = _parse_optional_datetime_slot(slots.get("end_time"))
-
     event = await calendar_service.create_event(
         EventCreate(
             user_id=payload.user_id,
@@ -296,7 +424,14 @@ async def _handle_create_event(
                 remind_time=start_time - timedelta(minutes=offset_minutes),
                 offset_minutes=offset_minutes,
                 channel="app_voice",
-            )
+        )
+    )
+
+    completed_state = None
+    if dialog_service is not None:
+        completed_state = await dialog_service.complete_state(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
         )
 
     await session.commit()
@@ -310,6 +445,8 @@ async def _handle_create_event(
             "time_parse": time_parse_details,
             "event": event_data,
             "reminder": reminder_data,
+            "conflicts": conflicts or [],
+            "cleared_state_id": getattr(completed_state, "id", None),
         }
     )
 
@@ -317,7 +454,7 @@ async def _handle_create_event(
         user_id=payload.user_id,
         session_id=payload.session_id,
         raw_text=payload.text,
-        intent=intent,
+        intent="create_event",
         confidence=nlu_result.confidence,
         entities=entities,
         voice_command_id=voice_command_id,
@@ -333,10 +470,12 @@ async def _handle_create_event(
         ),
         data={
             "voice_command_id": voice_command_id,
-            "intent": intent,
+            "conversation_state_id": getattr(completed_state, "id", None),
+            "intent": "create_event",
             "confidence": nlu_result.confidence,
             "event": event_data,
             "reminder": reminder_data,
+            "conflicts": conflicts or [],
         },
     )
 
@@ -555,6 +694,1133 @@ async def _handle_delete_event(
     )
 
 
+async def _handle_update_event(
+    *,
+    payload: VoiceCommandRequest,
+    session: AsyncSession,
+    dialog_service: DialogService,
+    intent: str,
+    slots: dict[str, Any],
+    nlu_result: NLUResult,
+    time_parse_details: dict[str, Any],
+    voice_command_id: str | None,
+    calendar_service: CalendarService,
+    voice_command_log_service: VoiceCommandLogService,
+) -> VoiceCommandResponse:
+    update_context = _resolve_update_context(payload=payload, slots=slots)
+    update_draft = update_context["updates"]
+
+    if not update_draft:
+        state = await dialog_service.create_pending_state(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            pending_intent=intent,
+            slots=slots,
+            missing_slots=["updates"],
+            status="need_more_info",
+        )
+        await session.commit()
+        return VoiceCommandResponse(
+            action="need_more_info",
+            need_user_reply=True,
+            reply="请说明要修改成什么内容。",
+            data={
+                "voice_command_id": voice_command_id,
+                "conversation_state_id": state.id,
+                "intent": intent,
+                "confidence": nlu_result.confidence,
+                "slots": _jsonable(slots),
+                "missing_slots": ["updates"],
+                "status": state.status,
+            },
+        )
+
+    if not update_context["keyword"] and update_context["target_range"] is None:
+        state = await dialog_service.create_pending_state(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            pending_intent=intent,
+            slots={**slots, "update_draft": update_draft},
+            missing_slots=["target_event"],
+            status="need_more_info",
+        )
+        await session.commit()
+        return VoiceCommandResponse(
+            action="need_more_info",
+            need_user_reply=True,
+            reply=_build_followup_reply(["target_event"]),
+            data={
+                "voice_command_id": voice_command_id,
+                "conversation_state_id": state.id,
+                "intent": intent,
+                "confidence": nlu_result.confidence,
+                "slots": _jsonable({**slots, "update_draft": update_draft}),
+                "missing_slots": ["target_event"],
+                "status": state.status,
+            },
+        )
+
+    candidates = await calendar_service.search_candidate_events(
+        user_id=payload.user_id,
+        keyword=update_context["keyword"],
+        limit=10,
+    )
+    matched_candidates = _filter_delete_candidates_by_date(
+        candidates,
+        date_range=update_context["target_range"],
+    )
+    candidate_events = [
+        _candidate_event_to_dict(candidate)
+        for candidate in sorted(matched_candidates, key=_event_sort_key)
+    ]
+    state_slots = {
+        **slots,
+        "update_draft": update_draft,
+        "update_target": _update_target_context_to_data(update_context),
+    }
+    entities = _jsonable(
+        {
+            "operation": "update_event_draft_prepared",
+            "slots": slots,
+            "missing_slots": [],
+            "time_parse": time_parse_details,
+            "update_context": _update_target_context_to_data(update_context),
+            "update_draft": update_draft,
+            "candidate_events": candidate_events,
+            "candidate_count": len(candidate_events),
+        }
+    )
+
+    if not candidate_events:
+        await voice_command_log_service.record_success(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            raw_text=payload.text,
+            intent=intent,
+            confidence=nlu_result.confidence,
+            entities=entities,
+            voice_command_id=voice_command_id,
+        )
+        return VoiceCommandResponse(
+            action="update_event_not_found",
+            need_user_reply=False,
+            reply="我没有找到相关日程。",
+            data={
+                "voice_command_id": voice_command_id,
+                "intent": intent,
+                "confidence": nlu_result.confidence,
+                "keyword": update_context["keyword"],
+                "target_range": _date_range_to_data(update_context["target_range"]),
+                "updates": update_draft,
+                "candidate_events": [],
+            },
+        )
+
+    if len(candidate_events) == 1:
+        selected_candidate = candidate_events[0]
+        state = await dialog_service.create_pending_state(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            pending_intent=intent,
+            slots={
+                **state_slots,
+                "update_target_event_id": selected_candidate["id"],
+            },
+            missing_slots=[],
+            candidate_events=candidate_events,
+            status="need_confirm",
+        )
+        await session.commit()
+        await voice_command_log_service.record_success(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            raw_text=payload.text,
+            intent=intent,
+            confidence=nlu_result.confidence,
+            entities=entities,
+            voice_command_id=voice_command_id,
+        )
+        return VoiceCommandResponse(
+            action="update_event_need_confirm",
+            need_user_reply=True,
+            reply=_build_update_confirm_reply(
+                candidate=selected_candidate,
+                updates=update_draft,
+                slots=slots,
+            ),
+            data={
+                "voice_command_id": voice_command_id,
+                "conversation_state_id": state.id,
+                "intent": intent,
+                "confidence": nlu_result.confidence,
+                "update_target": _update_target_context_to_data(update_context),
+                "updates": update_draft,
+                "candidate_events": candidate_events,
+                "status": state.status,
+            },
+        )
+
+    state = await dialog_service.create_pending_state(
+        user_id=payload.user_id,
+        session_id=payload.session_id,
+        pending_intent=intent,
+        slots=state_slots,
+        missing_slots=[],
+        candidate_events=candidate_events,
+        status="need_select",
+    )
+    await session.commit()
+    await voice_command_log_service.record_success(
+        user_id=payload.user_id,
+        session_id=payload.session_id,
+        raw_text=payload.text,
+        intent=intent,
+        confidence=nlu_result.confidence,
+        entities=entities,
+        voice_command_id=voice_command_id,
+    )
+    return VoiceCommandResponse(
+        action="update_event_need_select",
+        need_user_reply=True,
+        reply=_build_update_candidates_reply(candidate_events, update_draft),
+        data={
+            "voice_command_id": voice_command_id,
+            "conversation_state_id": state.id,
+            "intent": intent,
+            "confidence": nlu_result.confidence,
+            "update_target": _update_target_context_to_data(update_context),
+            "updates": update_draft,
+            "candidate_events": candidate_events,
+            "status": state.status,
+        },
+    )
+
+
+async def _handle_pending_conflict_confirmation(
+    *,
+    payload: VoiceCommandRequest,
+    session: AsyncSession,
+    dialog_service: DialogService,
+    current_state: Any,
+    user_intent: str,
+    nlu_result: NLUResult,
+    voice_command_id: str | None,
+    calendar_service: CalendarService,
+    reminder_service: ReminderService,
+    voice_command_log_service: VoiceCommandLogService,
+) -> VoiceCommandResponse | None:
+    conflict_context = _state_conflict_context(current_state)
+    if conflict_context is None:
+        return None
+
+    operation = str(conflict_context.get("operation") or "")
+    conflicts = list(conflict_context.get("conflicts") or [])
+
+    if user_intent == "deny":
+        state = await dialog_service.cancel_state(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+        )
+        await session.commit()
+
+        entities = _jsonable(
+            {
+                "operation": f"{operation}_conflict_cancelled",
+                "conflicts": conflicts,
+                "previous_state": _dialog_state_to_dict(current_state),
+                "cleared_state_id": getattr(state, "id", None),
+            }
+        )
+        await voice_command_log_service.record_success(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            raw_text=payload.text,
+            intent=operation,
+            confidence=nlu_result.confidence,
+            entities=entities,
+            voice_command_id=voice_command_id,
+        )
+
+        return VoiceCommandResponse(
+            action=f"{operation}_cancelled",
+            need_user_reply=False,
+            reply="已取消创建。" if operation == "create_event" else "已取消修改。",
+            data={
+                "voice_command_id": voice_command_id,
+                "conversation_state_id": getattr(state, "id", None),
+                "intent": operation,
+                "conflicts": conflicts,
+                "status": getattr(state, "status", "cancelled"),
+            },
+        )
+
+    if user_intent != "confirm":
+        return VoiceCommandResponse(
+            action=f"{operation}_conflict_need_confirm",
+            need_user_reply=True,
+            reply=_build_conflict_reply(conflicts=conflicts, operation=operation),
+            data={
+                "voice_command_id": voice_command_id,
+                "intent": operation,
+                "conflicts": conflicts,
+                "status": getattr(current_state, "status", "need_confirm"),
+            },
+        )
+
+    if operation == "create_event":
+        return await _execute_create_event(
+            payload=payload,
+            session=session,
+            slots=_state_slots(current_state),
+            nlu_result=nlu_result,
+            time_parse_details=dict(conflict_context.get("time_parse") or {}),
+            voice_command_id=voice_command_id,
+            calendar_service=calendar_service,
+            reminder_service=reminder_service,
+            voice_command_log_service=voice_command_log_service,
+            conflicts=conflicts,
+            dialog_service=dialog_service,
+        )
+
+    if operation == "update_event":
+        return await _execute_update_event_from_state(
+            payload=payload,
+            session=session,
+            dialog_service=dialog_service,
+            current_state=current_state,
+            nlu_result=nlu_result,
+            voice_command_id=voice_command_id,
+            calendar_service=calendar_service,
+            reminder_service=reminder_service,
+            voice_command_log_service=voice_command_log_service,
+            conflicts=conflicts,
+        )
+
+    return None
+
+
+async def _save_create_conflict_confirmation(
+    *,
+    payload: VoiceCommandRequest,
+    session: AsyncSession,
+    dialog_service: DialogService,
+    intent: str,
+    slots: dict[str, Any],
+    nlu_result: NLUResult,
+    time_parse_details: dict[str, Any],
+    voice_command_id: str | None,
+    conflicts: list[dict[str, Any]],
+    voice_command_log_service: VoiceCommandLogService,
+) -> VoiceCommandResponse:
+    state_slots = {
+        **slots,
+        "conflict_confirmation": {
+            "operation": intent,
+            "conflicts": conflicts,
+            "time_parse": time_parse_details,
+        },
+    }
+    state = await dialog_service.create_pending_state(
+        user_id=payload.user_id,
+        session_id=payload.session_id,
+        pending_intent=intent,
+        slots=state_slots,
+        missing_slots=[],
+        status="need_confirm",
+    )
+    await session.commit()
+
+    entities = _jsonable(
+        {
+            "operation": "create_event_conflict_detected",
+            "slots": slots,
+            "time_parse": time_parse_details,
+            "conflicts": conflicts,
+            "conversation_state_id": state.id,
+        }
+    )
+    await voice_command_log_service.record_success(
+        user_id=payload.user_id,
+        session_id=payload.session_id,
+        raw_text=payload.text,
+        intent=intent,
+        confidence=nlu_result.confidence,
+        entities=entities,
+        voice_command_id=voice_command_id,
+    )
+
+    return VoiceCommandResponse(
+        action="create_event_conflict_need_confirm",
+        need_user_reply=True,
+        reply=_build_conflict_reply(conflicts=conflicts, operation="create_event"),
+        data={
+            "voice_command_id": voice_command_id,
+            "conversation_state_id": state.id,
+            "intent": intent,
+            "confidence": nlu_result.confidence,
+            "conflicts": conflicts,
+            "status": state.status,
+        },
+    )
+
+
+async def _save_update_conflict_confirmation(
+    *,
+    payload: VoiceCommandRequest,
+    session: AsyncSession,
+    dialog_service: DialogService,
+    current_state: Any,
+    nlu_result: NLUResult,
+    voice_command_id: str | None,
+    conflicts: list[dict[str, Any]],
+    voice_command_log_service: VoiceCommandLogService,
+) -> VoiceCommandResponse:
+    state_slots = {
+        **_state_slots(current_state),
+        "conflict_confirmation": {
+            "operation": "update_event",
+            "conflicts": conflicts,
+        },
+    }
+    state = await dialog_service.create_pending_state(
+        user_id=payload.user_id,
+        session_id=payload.session_id,
+        pending_intent="update_event",
+        slots=state_slots,
+        missing_slots=[],
+        candidate_events=_state_candidate_events(current_state),
+        status="need_confirm",
+    )
+    await session.commit()
+
+    entities = _jsonable(
+        {
+            "operation": "update_event_conflict_detected",
+            "update_draft": _update_draft_from_state(current_state),
+            "conflicts": conflicts,
+            "previous_state": _dialog_state_to_dict(current_state),
+            "conversation_state_id": state.id,
+        }
+    )
+    await voice_command_log_service.record_success(
+        user_id=payload.user_id,
+        session_id=payload.session_id,
+        raw_text=payload.text,
+        intent="update_event",
+        confidence=nlu_result.confidence,
+        entities=entities,
+        voice_command_id=voice_command_id,
+    )
+
+    return VoiceCommandResponse(
+        action="update_event_conflict_need_confirm",
+        need_user_reply=True,
+        reply=_build_conflict_reply(conflicts=conflicts, operation="update_event"),
+        data={
+            "voice_command_id": voice_command_id,
+            "conversation_state_id": state.id,
+            "intent": "update_event",
+            "updates": _update_draft_from_state(current_state),
+            "conflicts": conflicts,
+            "candidate_events": _state_candidate_events(current_state),
+            "status": state.status,
+        },
+    )
+
+
+async def _handle_pending_update_event(
+    *,
+    payload: VoiceCommandRequest,
+    session: AsyncSession,
+    dialog_service: DialogService,
+    current_state: Any,
+    user_intent: str,
+    slots: dict[str, Any],
+    nlu_result: NLUResult,
+    voice_command_id: str | None,
+    calendar_service: CalendarService,
+    conflict_service: ConflictService,
+    reminder_service: ReminderService,
+    voice_command_log_service: VoiceCommandLogService,
+) -> VoiceCommandResponse | None:
+    if user_intent == "deny":
+        state = await dialog_service.cancel_state(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+        )
+        await session.commit()
+
+        entities = _jsonable(
+            {
+                "operation": "update_event_cancelled",
+                "previous_state": _dialog_state_to_dict(current_state),
+                "cleared_state_id": getattr(state, "id", None),
+            }
+        )
+        await voice_command_log_service.record_success(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            raw_text=payload.text,
+            intent="update_event",
+            confidence=nlu_result.confidence,
+            entities=entities,
+            voice_command_id=voice_command_id,
+        )
+
+        return VoiceCommandResponse(
+            action="update_event_cancelled",
+            need_user_reply=False,
+            reply="已取消修改。",
+            data={
+                "voice_command_id": voice_command_id,
+                "conversation_state_id": getattr(state, "id", None),
+                "intent": "update_event",
+                "event": None,
+                "status": getattr(state, "status", "cancelled"),
+            },
+        )
+
+    state_status = str(getattr(current_state, "status", "") or "")
+    candidate_events = _state_candidate_events(current_state)
+    update_draft = _update_draft_from_state(current_state)
+
+    if state_status == "need_select":
+        selected_candidate = _select_candidate_from_reply(
+            text=payload.text,
+            slots=slots,
+            candidate_events=candidate_events,
+        )
+        if selected_candidate is None:
+            return VoiceCommandResponse(
+                action="update_event_need_select",
+                need_user_reply=True,
+                reply=_build_update_candidates_reply(candidate_events, update_draft)
+                if candidate_events
+                else "请告诉我要修改哪一个日程。",
+                data={
+                    "voice_command_id": voice_command_id,
+                    "intent": "update_event",
+                    "updates": update_draft,
+                    "candidate_events": candidate_events,
+                    "status": state_status,
+                },
+            )
+
+        confirm_state = await dialog_service.create_pending_state(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            pending_intent="update_event",
+            slots={
+                **_state_slots(current_state),
+                **slots,
+                "update_target_event_id": selected_candidate["id"],
+            },
+            missing_slots=[],
+            candidate_events=[selected_candidate],
+            status="need_confirm",
+        )
+        await session.commit()
+
+        entities = _jsonable(
+            {
+                "operation": "update_event_candidate_selected",
+                "selected_candidate": selected_candidate,
+                "update_draft": update_draft,
+                "previous_state": _dialog_state_to_dict(current_state),
+            }
+        )
+        await voice_command_log_service.record_success(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            raw_text=payload.text,
+            intent="update_event",
+            confidence=nlu_result.confidence,
+            entities=entities,
+            voice_command_id=voice_command_id,
+        )
+
+        return VoiceCommandResponse(
+            action="update_event_need_confirm",
+            need_user_reply=True,
+            reply=_build_update_confirm_reply(
+                candidate=selected_candidate,
+                updates=update_draft,
+                slots=_state_slots(confirm_state),
+            ),
+            data={
+                "voice_command_id": voice_command_id,
+                "conversation_state_id": confirm_state.id,
+                "intent": "update_event",
+                "updates": update_draft,
+                "candidate_events": [selected_candidate],
+                "status": confirm_state.status,
+            },
+        )
+
+    if user_intent != "confirm":
+        selected_candidate = _update_target_candidate_from_state(current_state)
+        return VoiceCommandResponse(
+            action="update_event_need_confirm",
+            need_user_reply=True,
+            reply=_build_update_confirm_reply(
+                candidate=selected_candidate or {},
+                updates=update_draft,
+                slots=_state_slots(current_state),
+            )
+            if selected_candidate is not None
+            else "请确认是否修改该日程？",
+            data={
+                "voice_command_id": voice_command_id,
+                "intent": "update_event",
+                "updates": update_draft,
+                "candidate_events": candidate_events,
+                "status": state_status or "need_confirm",
+            },
+        )
+
+    target_event_id = _update_target_event_id_from_state(current_state)
+    if target_event_id is None:
+        return VoiceCommandResponse(
+            action="update_event_need_select",
+            need_user_reply=True,
+            reply="请先选择要修改哪一个日程。",
+            data={
+                "voice_command_id": voice_command_id,
+                "intent": "update_event",
+                "updates": update_draft,
+                "candidate_events": candidate_events,
+                "status": state_status,
+            },
+        )
+
+    existing_event = await calendar_service.get_event(target_event_id)
+    if existing_event is None:
+        cleared_state = await dialog_service.cancel_state(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+        )
+        await session.commit()
+
+        entities = _jsonable(
+            {
+                "operation": "update_event_target_missing",
+                "target_event_id": target_event_id,
+                "update_draft": update_draft,
+                "previous_state": _dialog_state_to_dict(current_state),
+                "cleared_state_id": getattr(cleared_state, "id", None),
+            }
+        )
+        await voice_command_log_service.record_success(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            raw_text=payload.text,
+            intent="update_event",
+            confidence=nlu_result.confidence,
+            entities=entities,
+            voice_command_id=voice_command_id,
+        )
+
+        return VoiceCommandResponse(
+            action="update_event_not_found",
+            need_user_reply=False,
+            reply="我没有找到相关日程，修改已取消。",
+            data={
+                "voice_command_id": voice_command_id,
+                "conversation_state_id": getattr(cleared_state, "id", None),
+                "intent": "update_event",
+                "event": None,
+                "updates": update_draft,
+                "status": getattr(cleared_state, "status", "cancelled"),
+            },
+        )
+
+    conflict_range = _update_conflict_range(existing_event=existing_event, update_draft=update_draft)
+    if conflict_range is not None:
+        conflicts = await conflict_service.list_conflicting_events_excluding_current(
+            user_id=payload.user_id,
+            start_time=conflict_range["start_time"],
+            end_time=conflict_range["end_time"],
+            current_event_id=target_event_id,
+        )
+        conflict_data = _conflicts_to_data(conflicts)
+        if conflict_data:
+            return await _save_update_conflict_confirmation(
+                payload=payload,
+                session=session,
+                dialog_service=dialog_service,
+                current_state=current_state,
+                nlu_result=nlu_result,
+                voice_command_id=voice_command_id,
+                conflicts=conflict_data,
+                voice_command_log_service=voice_command_log_service,
+            )
+
+    event_update = _event_update_from_draft(update_draft)
+    updated_event = await calendar_service.update_event(target_event_id, event_update)
+    if updated_event is None:
+        cleared_state = await dialog_service.cancel_state(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+        )
+        await session.commit()
+
+        entities = _jsonable(
+            {
+                "operation": "update_event_target_missing",
+                "target_event_id": target_event_id,
+                "update_draft": update_draft,
+                "previous_state": _dialog_state_to_dict(current_state),
+                "cleared_state_id": getattr(cleared_state, "id", None),
+            }
+        )
+        await voice_command_log_service.record_success(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            raw_text=payload.text,
+            intent="update_event",
+            confidence=nlu_result.confidence,
+            entities=entities,
+            voice_command_id=voice_command_id,
+        )
+
+        return VoiceCommandResponse(
+            action="update_event_not_found",
+            need_user_reply=False,
+            reply="我没有找到相关日程，修改已取消。",
+            data={
+                "voice_command_id": voice_command_id,
+                "conversation_state_id": getattr(cleared_state, "id", None),
+                "intent": "update_event",
+                "event": None,
+                "updates": update_draft,
+                "status": getattr(cleared_state, "status", "cancelled"),
+            },
+        )
+
+    reminder_result = await _rebuild_event_reminder_if_needed(
+        event=updated_event,
+        update_draft=update_draft,
+        payload=payload,
+        reminder_service=reminder_service,
+    )
+    completed_state = await dialog_service.complete_state(
+        user_id=payload.user_id,
+        session_id=payload.session_id,
+    )
+    await session.commit()
+
+    event_data = _model_to_dict(updated_event, EVENT_RESPONSE_FIELDS)
+    entities = _jsonable(
+        {
+            "operation": "update_event_confirmed",
+            "target_event_id": target_event_id,
+            "update_draft": update_draft,
+            "event": event_data,
+            "reminder": reminder_result,
+            "cleared_state_id": getattr(completed_state, "id", None),
+            "previous_state": _dialog_state_to_dict(current_state),
+        }
+    )
+    await voice_command_log_service.record_success(
+        user_id=payload.user_id,
+        session_id=payload.session_id,
+        raw_text=payload.text,
+        intent="update_event",
+        confidence=nlu_result.confidence,
+        entities=entities,
+        voice_command_id=voice_command_id,
+    )
+
+    return VoiceCommandResponse(
+        action="event_updated",
+        need_user_reply=False,
+        reply=_build_event_updated_reply(event_data=event_data, update_draft=update_draft),
+        data={
+            "voice_command_id": voice_command_id,
+            "conversation_state_id": getattr(completed_state, "id", None),
+            "intent": "update_event",
+            "event": event_data,
+            "updates": update_draft,
+            "reminder": reminder_result,
+        },
+    )
+
+
+async def _execute_update_event_from_state(
+    *,
+    payload: VoiceCommandRequest,
+    session: AsyncSession,
+    dialog_service: DialogService,
+    current_state: Any,
+    nlu_result: NLUResult,
+    voice_command_id: str | None,
+    calendar_service: CalendarService,
+    reminder_service: ReminderService,
+    voice_command_log_service: VoiceCommandLogService,
+    conflicts: list[dict[str, Any]] | None = None,
+) -> VoiceCommandResponse:
+    update_draft = _update_draft_from_state(current_state)
+    target_event_id = _update_target_event_id_from_state(current_state)
+    if target_event_id is None:
+        return VoiceCommandResponse(
+            action="update_event_need_select",
+            need_user_reply=True,
+            reply="请先选择要修改哪一个日程。",
+            data={
+                "voice_command_id": voice_command_id,
+                "intent": "update_event",
+                "updates": update_draft,
+                "candidate_events": _state_candidate_events(current_state),
+                "conflicts": conflicts or [],
+                "status": getattr(current_state, "status", None),
+            },
+        )
+
+    existing_event = await calendar_service.get_event(target_event_id)
+    if existing_event is None:
+        cleared_state = await dialog_service.cancel_state(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+        )
+        await session.commit()
+
+        entities = _jsonable(
+            {
+                "operation": "update_event_target_missing",
+                "target_event_id": target_event_id,
+                "update_draft": update_draft,
+                "conflicts": conflicts or [],
+                "previous_state": _dialog_state_to_dict(current_state),
+                "cleared_state_id": getattr(cleared_state, "id", None),
+            }
+        )
+        await voice_command_log_service.record_success(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            raw_text=payload.text,
+            intent="update_event",
+            confidence=nlu_result.confidence,
+            entities=entities,
+            voice_command_id=voice_command_id,
+        )
+
+        return VoiceCommandResponse(
+            action="update_event_not_found",
+            need_user_reply=False,
+            reply="我没有找到相关日程，修改已取消。",
+            data={
+                "voice_command_id": voice_command_id,
+                "conversation_state_id": getattr(cleared_state, "id", None),
+                "intent": "update_event",
+                "event": None,
+                "updates": update_draft,
+                "conflicts": conflicts or [],
+                "status": getattr(cleared_state, "status", "cancelled"),
+            },
+        )
+
+    event_update = _event_update_from_draft(update_draft)
+    updated_event = await calendar_service.update_event(target_event_id, event_update)
+    if updated_event is None:
+        cleared_state = await dialog_service.cancel_state(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+        )
+        await session.commit()
+
+        entities = _jsonable(
+            {
+                "operation": "update_event_target_missing",
+                "target_event_id": target_event_id,
+                "update_draft": update_draft,
+                "conflicts": conflicts or [],
+                "previous_state": _dialog_state_to_dict(current_state),
+                "cleared_state_id": getattr(cleared_state, "id", None),
+            }
+        )
+        await voice_command_log_service.record_success(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            raw_text=payload.text,
+            intent="update_event",
+            confidence=nlu_result.confidence,
+            entities=entities,
+            voice_command_id=voice_command_id,
+        )
+
+        return VoiceCommandResponse(
+            action="update_event_not_found",
+            need_user_reply=False,
+            reply="我没有找到相关日程，修改已取消。",
+            data={
+                "voice_command_id": voice_command_id,
+                "conversation_state_id": getattr(cleared_state, "id", None),
+                "intent": "update_event",
+                "event": None,
+                "updates": update_draft,
+                "conflicts": conflicts or [],
+                "status": getattr(cleared_state, "status", "cancelled"),
+            },
+        )
+
+    reminder_result = await _rebuild_event_reminder_if_needed(
+        event=updated_event,
+        update_draft=update_draft,
+        payload=payload,
+        reminder_service=reminder_service,
+    )
+    completed_state = await dialog_service.complete_state(
+        user_id=payload.user_id,
+        session_id=payload.session_id,
+    )
+    await session.commit()
+
+    event_data = _model_to_dict(updated_event, EVENT_RESPONSE_FIELDS)
+    entities = _jsonable(
+        {
+            "operation": "update_event_confirmed",
+            "target_event_id": target_event_id,
+            "update_draft": update_draft,
+            "event": event_data,
+            "reminder": reminder_result,
+            "conflicts": conflicts or [],
+            "cleared_state_id": getattr(completed_state, "id", None),
+            "previous_state": _dialog_state_to_dict(current_state),
+        }
+    )
+    await voice_command_log_service.record_success(
+        user_id=payload.user_id,
+        session_id=payload.session_id,
+        raw_text=payload.text,
+        intent="update_event",
+        confidence=nlu_result.confidence,
+        entities=entities,
+        voice_command_id=voice_command_id,
+    )
+
+    return VoiceCommandResponse(
+        action="event_updated",
+        need_user_reply=False,
+        reply=_build_event_updated_reply(event_data=event_data, update_draft=update_draft),
+        data={
+            "voice_command_id": voice_command_id,
+            "conversation_state_id": getattr(completed_state, "id", None),
+            "intent": "update_event",
+            "event": event_data,
+            "updates": update_draft,
+            "reminder": reminder_result,
+            "conflicts": conflicts or [],
+        },
+    )
+
+
+async def _handle_pending_delete_event(
+    *,
+    payload: VoiceCommandRequest,
+    session: AsyncSession,
+    dialog_service: DialogService,
+    current_state: Any,
+    user_intent: str,
+    slots: dict[str, Any],
+    nlu_result: NLUResult,
+    voice_command_id: str | None,
+    calendar_service: CalendarService,
+    reminder_service: ReminderService,
+    voice_command_log_service: VoiceCommandLogService,
+) -> VoiceCommandResponse | None:
+    if user_intent == "deny":
+        state = await dialog_service.cancel_state(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+        )
+        await session.commit()
+
+        entities = _jsonable(
+            {
+                "operation": "delete_event_cancelled",
+                "previous_state": _dialog_state_to_dict(current_state),
+                "cleared_state_id": getattr(state, "id", None),
+            }
+        )
+        await voice_command_log_service.record_success(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            raw_text=payload.text,
+            intent="delete_event",
+            confidence=nlu_result.confidence,
+            entities=entities,
+            voice_command_id=voice_command_id,
+        )
+
+        return VoiceCommandResponse(
+            action="delete_event_cancelled",
+            need_user_reply=False,
+            reply="已取消删除。",
+            data={
+                "voice_command_id": voice_command_id,
+                "conversation_state_id": getattr(state, "id", None),
+                "intent": "delete_event",
+                "status": getattr(state, "status", "cancelled"),
+            },
+        )
+
+    state_status = str(getattr(current_state, "status", "") or "")
+    candidate_events = _state_candidate_events(current_state)
+
+    if state_status == "need_select":
+        selected_candidate = _select_candidate_from_reply(
+            text=payload.text,
+            slots=slots,
+            candidate_events=candidate_events,
+        )
+        if selected_candidate is None:
+            return VoiceCommandResponse(
+                action="delete_event_need_select",
+                need_user_reply=True,
+                reply=_build_delete_candidates_reply(candidate_events)
+                if candidate_events
+                else "请告诉我要删除哪一个日程。",
+                data={
+                    "voice_command_id": voice_command_id,
+                    "intent": "delete_event",
+                    "candidate_events": candidate_events,
+                    "status": state_status,
+                },
+            )
+
+        confirm_state = await dialog_service.create_pending_state(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            pending_intent="delete_event",
+            slots={
+                **_state_slots(current_state),
+                **slots,
+                "delete_target_event_id": selected_candidate["id"],
+            },
+            missing_slots=[],
+            candidate_events=[selected_candidate],
+            status="need_confirm",
+        )
+        await session.commit()
+
+        entities = _jsonable(
+            {
+                "operation": "delete_event_candidate_selected",
+                "selected_candidate": selected_candidate,
+                "previous_state": _dialog_state_to_dict(current_state),
+            }
+        )
+        await voice_command_log_service.record_success(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            raw_text=payload.text,
+            intent="delete_event",
+            confidence=nlu_result.confidence,
+            entities=entities,
+            voice_command_id=voice_command_id,
+        )
+
+        return VoiceCommandResponse(
+            action="delete_event_need_confirm",
+            need_user_reply=True,
+            reply=f"请确认是否删除{_format_candidate_for_reply(selected_candidate)}？",
+            data={
+                "voice_command_id": voice_command_id,
+                "conversation_state_id": confirm_state.id,
+                "intent": "delete_event",
+                "candidate_events": [selected_candidate],
+                "status": confirm_state.status,
+            },
+        )
+
+    if user_intent != "confirm":
+        selected_candidate = _delete_target_candidate_from_state(current_state)
+        return VoiceCommandResponse(
+            action="delete_event_need_confirm",
+            need_user_reply=True,
+            reply=f"请确认是否删除{_format_candidate_for_reply(selected_candidate)}？"
+            if selected_candidate is not None
+            else "请确认是否删除该日程？",
+            data={
+                "voice_command_id": voice_command_id,
+                "intent": "delete_event",
+                "candidate_events": candidate_events,
+                "status": state_status or "need_confirm",
+            },
+        )
+
+    target_event_id = _delete_target_event_id_from_state(current_state)
+    if target_event_id is None:
+        return VoiceCommandResponse(
+            action="delete_event_need_select",
+            need_user_reply=True,
+            reply="请先选择要删除哪一个日程。",
+            data={
+                "voice_command_id": voice_command_id,
+                "intent": "delete_event",
+                "candidate_events": candidate_events,
+                "status": state_status,
+            },
+        )
+
+    deleted_event = await calendar_service.soft_delete_event(target_event_id)
+    cancelled_reminders = await reminder_service.cancel_event_reminders(
+        event_id=target_event_id,
+        user_id=payload.user_id,
+    )
+    completed_state = await dialog_service.complete_state(
+        user_id=payload.user_id,
+        session_id=payload.session_id,
+    )
+    await session.commit()
+
+    deleted_event_data = _model_to_dict(deleted_event, EVENT_RESPONSE_FIELDS) if deleted_event is not None else None
+    cancelled_reminder_data = [
+        _model_to_dict(reminder, REMINDER_RESPONSE_FIELDS)
+        for reminder in cancelled_reminders
+    ]
+    undo_data = {
+        "type": "restore_deleted_event",
+        "event_id": target_event_id,
+        "event": deleted_event_data,
+        "cancelled_reminders": cancelled_reminder_data,
+    }
+    entities = _jsonable(
+        {
+            "operation": "delete_event_confirmed",
+            "deleted_event_id": target_event_id,
+            "deleted_event": deleted_event_data,
+            "cancelled_reminders": cancelled_reminder_data,
+            "undo": undo_data,
+            "cleared_state_id": getattr(completed_state, "id", None),
+            "previous_state": _dialog_state_to_dict(current_state),
+        }
+    )
+    await voice_command_log_service.record_success(
+        user_id=payload.user_id,
+        session_id=payload.session_id,
+        raw_text=payload.text,
+        intent="delete_event",
+        confidence=nlu_result.confidence,
+        entities=entities,
+        voice_command_id=voice_command_id,
+    )
+
+    return VoiceCommandResponse(
+        action="event_deleted",
+        need_user_reply=False,
+        reply=f"已删除{_deleted_event_reply_target(deleted_event_data, current_state)}。",
+        data={
+            "voice_command_id": voice_command_id,
+            "conversation_state_id": getattr(completed_state, "id", None),
+            "intent": "delete_event",
+            "event": deleted_event_data,
+            "cancelled_reminders": cancelled_reminder_data,
+            "undo": _jsonable(undo_data),
+        },
+    )
+
+
 def _resolve_intent(nlu_result: NLUResult, current_state: Any | None) -> str:
     pending_intent = getattr(current_state, "pending_intent", None)
     if pending_intent and nlu_result.intent == "unknown":
@@ -625,6 +1891,9 @@ def _resolve_missing_slots(
     time_missing_slots: list[str],
 ) -> list[str]:
     if intent == "query_event":
+        return []
+
+    if intent == "update_event":
         return []
 
     if intent == "delete_event":
@@ -740,6 +2009,209 @@ def _parse_int_slot(value: Any, default: int = 0) -> int:
 
 def _model_to_dict(model: Any, fields: list[str]) -> dict[str, Any]:
     return _jsonable({field: getattr(model, field, None) for field in fields})
+
+
+def _is_pending_delete_state(state: Any | None) -> bool:
+    return state is not None and getattr(state, "pending_intent", None) == "delete_event"
+
+
+def _is_pending_update_state(state: Any | None) -> bool:
+    return state is not None and getattr(state, "pending_intent", None) == "update_event"
+
+
+def _is_pending_conflict_state(state: Any | None) -> bool:
+    return _state_conflict_context(state) is not None
+
+
+def _state_slots(state: Any) -> dict[str, Any]:
+    slots = getattr(state, "slots", None)
+    return dict(slots) if isinstance(slots, Mapping) else {}
+
+
+def _state_conflict_context(state: Any | None) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    conflict_context = _state_slots(state).get("conflict_confirmation")
+    if not isinstance(conflict_context, Mapping):
+        return None
+    operation = conflict_context.get("operation")
+    if operation not in {"create_event", "update_event"}:
+        return None
+    return _jsonable(dict(conflict_context))
+
+
+def _state_candidate_events(state: Any) -> list[dict[str, Any]]:
+    candidates = getattr(state, "candidate_events", None)
+    if not isinstance(candidates, list):
+        return []
+    return [
+        _jsonable(
+            {
+                "id": candidate.get("id") if isinstance(candidate, Mapping) else getattr(candidate, "id", None),
+                "title": candidate.get("title") if isinstance(candidate, Mapping) else getattr(candidate, "title", None),
+                "start_time": candidate.get("start_time") if isinstance(candidate, Mapping) else getattr(candidate, "start_time", None),
+            }
+        )
+        for candidate in candidates
+    ]
+
+
+def _dialog_state_to_dict(state: Any | None) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    return _jsonable(
+        {
+            "id": getattr(state, "id", None),
+            "user_id": getattr(state, "user_id", None),
+            "session_id": getattr(state, "session_id", None),
+            "pending_intent": getattr(state, "pending_intent", None),
+            "slots": _state_slots(state),
+            "missing_slots": list(getattr(state, "missing_slots", []) or []),
+            "candidate_events": _state_candidate_events(state),
+            "status": getattr(state, "status", None),
+            "expires_at": getattr(state, "expires_at", None),
+            "updated_at": getattr(state, "updated_at", None),
+        }
+    )
+
+
+def _delete_target_event_id_from_state(state: Any) -> str | None:
+    slots = _state_slots(state)
+    target_id = _optional_str(slots.get("delete_target_event_id"))
+    if target_id is not None:
+        return target_id
+
+    candidate = _delete_target_candidate_from_state(state)
+    if candidate is None:
+        return None
+    return _optional_str(candidate.get("id"))
+
+
+def _delete_target_candidate_from_state(state: Any) -> dict[str, Any] | None:
+    candidates = _state_candidate_events(state)
+    if len(candidates) == 1:
+        return candidates[0]
+
+    target_id = _optional_str(_state_slots(state).get("delete_target_event_id"))
+    if target_id is None:
+        return None
+
+    for candidate in candidates:
+        if candidate.get("id") == target_id:
+            return candidate
+    return None
+
+
+def _update_draft_from_state(state: Any) -> dict[str, Any]:
+    slots = _state_slots(state)
+    update_draft = slots.get("update_draft")
+    if isinstance(update_draft, Mapping):
+        return _jsonable(dict(update_draft))
+    return _extract_update_draft(slots)
+
+
+def _update_target_event_id_from_state(state: Any) -> str | None:
+    slots = _state_slots(state)
+    target_id = _optional_str(slots.get("update_target_event_id"))
+    if target_id is not None:
+        return target_id
+
+    candidate = _update_target_candidate_from_state(state)
+    if candidate is None:
+        return None
+    return _optional_str(candidate.get("id"))
+
+
+def _update_target_candidate_from_state(state: Any) -> dict[str, Any] | None:
+    candidates = _state_candidate_events(state)
+    if len(candidates) == 1:
+        return candidates[0]
+
+    target_id = _optional_str(_state_slots(state).get("update_target_event_id"))
+    if target_id is None:
+        return None
+
+    for candidate in candidates:
+        if candidate.get("id") == target_id:
+            return candidate
+    return None
+
+
+def _select_candidate_from_reply(
+    *,
+    text: str,
+    slots: Mapping[str, Any],
+    candidate_events: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not candidate_events:
+        return None
+
+    selected_id = _optional_str(slots.get("selected_event_id"))
+    if selected_id is not None:
+        for candidate in candidate_events:
+            if candidate.get("id") == selected_id:
+                return candidate
+
+    index = _selection_index_from_text(text)
+    if index is not None and 0 <= index < len(candidate_events):
+        return candidate_events[index]
+
+    target_text = _optional_str(slots.get("target_event")) or _optional_str(text)
+    if target_text is None:
+        return None
+
+    for candidate in candidate_events:
+        title = _optional_str(candidate.get("title"))
+        if title and (target_text in title or title in target_text):
+            return candidate
+    return None
+
+
+def _selection_index_from_text(text: str) -> int | None:
+    normalized = text.strip().lower()
+    for digit in ("1", "2", "3", "4", "5", "6", "7", "8", "9"):
+        if digit in normalized:
+            return int(digit) - 1
+
+    selection_words = {
+        "第一个": 0,
+        "第1个": 0,
+        "一": 0,
+        "第一个": 0,
+        "第二个": 1,
+        "第2个": 1,
+        "二": 1,
+        "第三个": 2,
+        "第3个": 2,
+        "三": 2,
+        "第四个": 3,
+        "第4个": 3,
+        "四": 3,
+        "第五个": 4,
+        "第5个": 4,
+        "五": 4,
+    }
+    for word, index in selection_words.items():
+        if word in normalized:
+            return index
+    return None
+
+
+def _deleted_event_reply_target(
+    event_data: Mapping[str, Any] | None,
+    previous_state: Any,
+) -> str:
+    if event_data is not None:
+        title = _optional_str(event_data.get("title"))
+        if title is not None:
+            return f"：{title}"
+
+    candidate = _delete_target_candidate_from_state(previous_state)
+    if candidate is not None:
+        title = _optional_str(candidate.get("title"))
+        if title is not None:
+            return f"：{title}"
+    return "该日程"
 
 
 def _resolve_delete_search_context(
@@ -862,6 +2334,564 @@ def _delete_search_context_to_data(search_context: Mapping[str, Any]) -> dict[st
             "time_text": search_context.get("time_text"),
         }
     )
+
+
+def _resolve_update_context(
+    *,
+    payload: VoiceCommandRequest,
+    slots: Mapping[str, Any],
+) -> dict[str, Any]:
+    target_text = _extract_update_target_text(payload.text or "")
+    update_text = _extract_update_text(payload.text or "")
+    target_date_text = (
+        _optional_str(_first_slot_value(slots, "target_date_text", "old_date_text", "original_date_text"))
+        or _extract_date_hint_from_text(target_text)
+    )
+    target_time_text = (
+        _optional_str(_first_slot_value(slots, "target_time_text", "old_time_text", "original_time_text"))
+        or _extract_time_period_from_text(target_text)
+    )
+
+    return {
+        "keyword": _extract_update_keyword(
+            payload=payload,
+            slots=slots,
+            target_text=target_text,
+        ),
+        "target_range": _resolve_update_target_range(
+            payload=payload,
+            slots=slots,
+            target_text=target_text,
+            target_date_text=target_date_text,
+            target_time_text=target_time_text,
+        ),
+        "target_event": slots.get("target_event"),
+        "target_text": target_text,
+        "update_text": update_text,
+        "target_date_text": target_date_text,
+        "target_time_text": target_time_text,
+        "updates": _extract_update_draft(slots),
+    }
+
+
+def _extract_update_target_text(text: str) -> str:
+    match = _find_update_action_match(text)
+    if match is None:
+        return text
+    return text[: match.start()]
+
+
+def _extract_update_text(text: str) -> str:
+    match = _find_update_action_match(text)
+    if match is None:
+        return ""
+    return text[match.end() :]
+
+
+def _find_update_action_match(text: str) -> re.Match[str] | None:
+    return re.search(r"(改到|改成|修改为|换成|调整到|提前到|推迟到)", text)
+
+
+def _extract_update_keyword(
+    *,
+    payload: VoiceCommandRequest,
+    slots: Mapping[str, Any],
+    target_text: str,
+) -> str:
+    target_event = _optional_str(slots.get("target_event"))
+    if target_event is not None:
+        return target_event
+
+    keyword = target_text or payload.text or ""
+    for value in (
+        slots.get("target_date_text"),
+        slots.get("target_time_text"),
+        slots.get("old_date_text"),
+        slots.get("old_time_text"),
+        slots.get("original_date_text"),
+        slots.get("original_time_text"),
+    ):
+        if value:
+            keyword = keyword.replace(str(value), "")
+
+    keyword = _remove_update_time_words(keyword)
+    for word in (
+        "请",
+        "帮我",
+        "把",
+        "将",
+        "给我",
+        "我要",
+        "一下",
+        "这个",
+        "那个",
+        "一个",
+        "的",
+        "要",
+        "日程",
+        "安排",
+        "提醒",
+    ):
+        keyword = keyword.replace(word, "")
+
+    keyword = re.sub(r"[，。,.！？!?\s]", "", keyword)
+    return _optional_str(keyword) or ""
+
+
+def _remove_update_time_words(text: str) -> str:
+    text = re.sub(r"(今天|明天|后天)", "", text)
+    text = re.sub(
+        r"(凌晨|早上|上午|中午|下午|晚上|今晚|夜里)"
+        r"([零〇一二两三四五六七八九十\d]{1,3})?"
+        r"(点|时)?(半|[零〇一二两三四五六七八九十\d]{1,3}分?)?",
+        "",
+        text,
+    )
+    return text
+
+
+def _extract_update_draft(slots: Mapping[str, Any]) -> dict[str, Any]:
+    aliases_by_field = {
+        "title": ("new_title", "update_title", "title"),
+        "start_time": ("new_start_time", "update_start_time", "start_time"),
+        "end_time": ("new_end_time", "update_end_time", "end_time"),
+        "location": ("new_location", "update_location", "location"),
+        "description": ("new_description", "update_description", "description"),
+        "participants": ("new_participants", "update_participants", "participants"),
+        "priority": ("new_priority", "update_priority", "priority"),
+        "is_all_day": ("new_is_all_day", "update_is_all_day", "is_all_day"),
+        "recurrence_rule": ("new_recurrence_rule", "update_recurrence_rule", "recurrence_rule"),
+        "reminder_offset_minutes": (
+            "new_reminder_offset_minutes",
+            "update_reminder_offset_minutes",
+            "reminder_offset_minutes",
+            "new_reminder_offset",
+            "update_reminder_offset",
+            "reminder_offset",
+        ),
+    }
+
+    updates: dict[str, Any] = {}
+    for field, aliases in aliases_by_field.items():
+        value = _first_slot_value(slots, *aliases)
+        if value is not None:
+            updates[field] = value
+
+    return _jsonable(updates)
+
+
+def _resolve_update_target_range(
+    *,
+    payload: VoiceCommandRequest,
+    slots: Mapping[str, Any],
+    target_text: str,
+    target_date_text: str | None,
+    target_time_text: str | None,
+) -> dict[str, datetime] | None:
+    tz = _get_timezone(payload.timezone)
+    base_time = _ensure_datetime_timezone(payload.client_time, tz)
+    explicit_start = _datetime_from_slot_keys(
+        slots,
+        timezone=tz,
+        keys=("target_start_time", "old_start_time", "original_start_time"),
+    )
+    explicit_end = _datetime_from_slot_keys(
+        slots,
+        timezone=tz,
+        keys=("target_end_time", "old_end_time", "original_end_time"),
+    )
+
+    if explicit_start is not None:
+        if explicit_end is not None:
+            return {"start_time": explicit_start, "end_time": explicit_end}
+
+        period_range = _period_range_for_text(
+            target_time_text or target_text,
+            target_date=explicit_start.date(),
+            timezone=tz,
+        )
+        if period_range is not None:
+            return period_range
+
+        return _day_range(explicit_start.date(), tz)
+
+    target_date = _date_from_text(target_date_text, base_time.date())
+    if target_date is None and target_time_text:
+        target_date = base_time.date()
+
+    if target_date is not None:
+        period_range = _period_range_for_text(
+            target_time_text or target_text,
+            target_date=target_date,
+            timezone=tz,
+        )
+        if period_range is not None:
+            return period_range
+        return _day_range(target_date, tz)
+
+    return None
+
+
+def _datetime_from_slot_keys(
+    slots: Mapping[str, Any],
+    *,
+    timezone: ZoneInfo | fixed_timezone,
+    keys: tuple[str, ...],
+) -> datetime | None:
+    value = _first_slot_value(slots, *keys)
+    if value is None:
+        return None
+    try:
+        parsed = _parse_datetime_slot(value)
+    except ValueError:
+        return None
+    return _ensure_datetime_timezone(parsed, timezone)
+
+
+def _first_slot_value(slots: Mapping[str, Any], *keys: str) -> Any | None:
+    for key in keys:
+        value = slots.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _date_from_text(value: Any, base_date: date) -> date | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+
+    text = str(value)
+    if "今天" in text:
+        return base_date
+    if "明天" in text:
+        return base_date + timedelta(days=1)
+    if "后天" in text:
+        return base_date + timedelta(days=2)
+
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _extract_date_hint_from_text(text: str) -> str | None:
+    for value in ("今天", "明天", "后天"):
+        if value in text:
+            return value
+    return None
+
+
+def _extract_time_period_from_text(text: str) -> str | None:
+    for value in ("凌晨", "早上", "上午", "中午", "下午", "晚上", "今晚", "夜里"):
+        if value in text:
+            return value
+    return None
+
+
+def _period_range_for_text(
+    text: str,
+    *,
+    target_date: date,
+    timezone: ZoneInfo | fixed_timezone,
+) -> dict[str, datetime] | None:
+    if not text:
+        return None
+
+    ranges = (
+        (("凌晨",), time(hour=0), time(hour=6)),
+        (("早上",), time(hour=6), time(hour=9)),
+        (("上午",), time(hour=6), time(hour=12)),
+        (("中午",), time(hour=11), time(hour=13)),
+        (("下午",), time(hour=12), time(hour=18)),
+        (("晚上", "今晚", "夜里"), time(hour=18), time.max),
+    )
+    for names, start_at, end_at in ranges:
+        if any(name in text for name in names):
+            start_time = datetime.combine(target_date, start_at, tzinfo=timezone)
+            if end_at == time.max:
+                end_time = datetime.combine(target_date + timedelta(days=1), time.min, tzinfo=timezone)
+            else:
+                end_time = datetime.combine(target_date, end_at, tzinfo=timezone)
+            return {"start_time": start_time, "end_time": end_time}
+
+    return None
+
+
+def _day_range(value: date, timezone: ZoneInfo | fixed_timezone) -> dict[str, datetime]:
+    start_time = datetime.combine(value, time.min, tzinfo=timezone)
+    return {"start_time": start_time, "end_time": start_time + timedelta(days=1)}
+
+
+def _update_target_context_to_data(update_context: Mapping[str, Any]) -> dict[str, Any]:
+    return _jsonable(
+        {
+            "keyword": update_context.get("keyword"),
+            "target_event": update_context.get("target_event"),
+            "target_text": update_context.get("target_text"),
+            "update_text": update_context.get("update_text"),
+            "target_date_text": update_context.get("target_date_text"),
+            "target_time_text": update_context.get("target_time_text"),
+            "target_range": _date_range_to_data(update_context.get("target_range")),
+        }
+    )
+
+
+def _build_update_confirm_reply(
+    *,
+    candidate: Mapping[str, Any],
+    updates: Mapping[str, Any],
+    slots: Mapping[str, Any],
+) -> str:
+    update_summary = _build_update_summary(updates=updates, slots=slots)
+    candidate_text = _format_candidate_for_reply(candidate)
+    if not update_summary:
+        return f"找到{candidate_text}，是否确认修改？"
+    if update_summary.startswith("改到"):
+        return f"找到{candidate_text}，是否将它{update_summary}？"
+    return f"找到{candidate_text}，是否按以下内容修改它：{update_summary}？"
+
+
+def _build_update_candidates_reply(
+    candidate_events: list[Mapping[str, Any]],
+    update_draft: Mapping[str, Any],
+) -> str:
+    summaries = [
+        f"{index + 1}. {_format_candidate_for_reply(candidate)}"
+        for index, candidate in enumerate(candidate_events)
+    ]
+    update_summary = _build_update_summary(updates=update_draft, slots={})
+    action_text = f"，准备{update_summary}" if update_summary else ""
+    return "我找到了多个相关日程" + action_text + "，请选择要修改哪一个：" + "；".join(summaries) + "。"
+
+
+def _build_update_summary(
+    *,
+    updates: Mapping[str, Any],
+    slots: Mapping[str, Any],
+) -> str:
+    parts: list[str] = []
+
+    if updates.get("start_time"):
+        parts.append(f"改到{_format_update_datetime(updates['start_time'], slots)}")
+    if updates.get("end_time"):
+        parts.append(f"结束时间改为{_format_datetime_value_for_voice(updates['end_time'])}")
+    if updates.get("title"):
+        parts.append(f"标题改为{updates['title']}")
+    if updates.get("location"):
+        parts.append(f"地点改为{updates['location']}")
+    if updates.get("reminder_offset_minutes") is not None:
+        parts.append(f"提醒改为{_format_reminder_offset(updates['reminder_offset_minutes'])}")
+
+    return "，".join(parts)
+
+
+def _format_update_datetime(value: Any, slots: Mapping[str, Any]) -> str:
+    date_text = _optional_str(_first_slot_value(slots, "new_date_text", "update_date_text", "date_text"))
+    time_text = _optional_str(_first_slot_value(slots, "new_time_text", "update_time_text", "time_text"))
+    if date_text and time_text:
+        return f"{date_text}{time_text}"
+    if time_text:
+        return time_text
+    if date_text:
+        return date_text
+    return _format_datetime_value_for_voice(value)
+
+
+def _format_datetime_value_for_voice(value: Any) -> str:
+    try:
+        parsed = _parse_datetime_slot(value)
+    except ValueError:
+        return str(value)
+    return f"{parsed.month}月{parsed.day}日{_format_time_of_day(parsed)}"
+
+
+def _format_reminder_offset(value: Any) -> str:
+    minutes = _parse_int_slot(value, default=0)
+    if minutes == 0:
+        return "准时提醒"
+    if minutes % 60 == 0:
+        return f"提前{minutes // 60}小时"
+    return f"提前{minutes}分钟"
+
+
+def _event_update_from_draft(update_draft: Mapping[str, Any]) -> EventUpdate:
+    data: dict[str, Any] = {}
+
+    if "title" in update_draft:
+        data["title"] = str(update_draft["title"])
+    if "description" in update_draft:
+        data["description"] = _optional_str(update_draft.get("description"))
+    if "start_time" in update_draft:
+        data["start_time"] = _parse_optional_datetime_slot(update_draft.get("start_time"))
+    if "end_time" in update_draft:
+        data["end_time"] = _parse_optional_datetime_slot(update_draft.get("end_time"))
+    if "location" in update_draft:
+        data["location"] = _optional_str(update_draft.get("location"))
+    if "participants" in update_draft:
+        data["participants"] = _normalize_participants(update_draft.get("participants"))
+    if "priority" in update_draft:
+        data["priority"] = str(update_draft["priority"])
+    if "is_all_day" in update_draft:
+        data["is_all_day"] = bool(update_draft.get("is_all_day"))
+    if "recurrence_rule" in update_draft:
+        data["recurrence_rule"] = _normalize_recurrence_rule(update_draft.get("recurrence_rule"))
+
+    return EventUpdate(**data)
+
+
+async def _rebuild_event_reminder_if_needed(
+    *,
+    event: Any,
+    update_draft: Mapping[str, Any],
+    payload: VoiceCommandRequest,
+    reminder_service: ReminderService,
+) -> dict[str, Any] | None:
+    if "reminder_offset_minutes" not in update_draft:
+        return None
+
+    event_id = _optional_str(getattr(event, "id", None))
+    event_start = _event_model_start_time(event)
+    if event_id is None or event_start is None:
+        return {
+            "cancelled_reminders": [],
+            "created_reminder": None,
+            "skipped_reason": "missing_event_time",
+        }
+
+    offset_minutes = _parse_int_slot(update_draft.get("reminder_offset_minutes"), default=0)
+    cancelled_reminders = await reminder_service.cancel_event_reminders(
+        event_id=event_id,
+        user_id=payload.user_id,
+    )
+    created_reminder = await reminder_service.create_reminder(
+        ReminderCreate(
+            event_id=event_id,
+            user_id=payload.user_id,
+            remind_time=event_start - timedelta(minutes=offset_minutes),
+            offset_minutes=offset_minutes,
+            channel="app_voice",
+        )
+    )
+
+    return _jsonable(
+        {
+            "cancelled_reminders": [
+                _model_to_dict(reminder, REMINDER_RESPONSE_FIELDS)
+                for reminder in cancelled_reminders
+            ],
+            "created_reminder": _model_to_dict(created_reminder, REMINDER_RESPONSE_FIELDS),
+        }
+    )
+
+
+def _event_model_start_time(event: Any) -> datetime | None:
+    value = getattr(event, "start_time", None)
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _event_model_end_time(event: Any) -> datetime | None:
+    value = getattr(event, "end_time", None)
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _conflict_end_time(
+    *,
+    start_time: datetime,
+    end_time: datetime | None,
+) -> datetime:
+    if end_time is not None and end_time > start_time:
+        return end_time
+    return start_time + timedelta(hours=1)
+
+
+def _update_conflict_range(
+    *,
+    existing_event: Any,
+    update_draft: Mapping[str, Any],
+) -> dict[str, datetime] | None:
+    if "start_time" not in update_draft and "end_time" not in update_draft:
+        return None
+
+    existing_start = _event_model_start_time(existing_event)
+    if existing_start is None:
+        return None
+
+    existing_end = _event_model_end_time(existing_event)
+    start_time = (
+        _parse_datetime_slot(update_draft["start_time"])
+        if update_draft.get("start_time")
+        else existing_start
+    )
+
+    if update_draft.get("end_time"):
+        end_time = _parse_datetime_slot(update_draft["end_time"])
+    elif existing_end is not None and existing_end > existing_start:
+        end_time = start_time + (existing_end - existing_start)
+    else:
+        end_time = None
+
+    return {
+        "start_time": start_time,
+        "end_time": _conflict_end_time(start_time=start_time, end_time=end_time),
+    }
+
+
+def _conflicts_to_data(conflicts: list[Any]) -> list[dict[str, Any]]:
+    return [
+        _jsonable(
+            {
+                "id": conflict.get("id") if isinstance(conflict, Mapping) else getattr(conflict, "id", None),
+                "title": conflict.get("title") if isinstance(conflict, Mapping) else getattr(conflict, "title", None),
+                "start_time": conflict.get("start_time") if isinstance(conflict, Mapping) else getattr(conflict, "start_time", None),
+                "end_time": conflict.get("end_time") if isinstance(conflict, Mapping) else getattr(conflict, "end_time", None),
+            }
+        )
+        for conflict in conflicts
+    ]
+
+
+def _build_conflict_reply(
+    *,
+    conflicts: list[Mapping[str, Any]],
+    operation: str,
+) -> str:
+    conflict_title = "相关日程"
+    if conflicts:
+        conflict_title = str(conflicts[0].get("title") or conflict_title)
+
+    if operation == "create_event":
+        return f"这个时间你已经有{conflict_title}，是否仍然创建新的日程？"
+    return f"这个时间你已经有{conflict_title}，是否仍然修改该日程？"
+
+
+def _build_event_updated_reply(
+    *,
+    event_data: Mapping[str, Any],
+    update_draft: Mapping[str, Any],
+) -> str:
+    title = event_data.get("title") or "该日程"
+    update_summary = _build_update_summary(updates=update_draft, slots={})
+    if update_summary:
+        return f"已修改{title}，{update_summary}。"
+    return f"已修改{title}。"
 
 
 def _date_range_to_data(date_range: Mapping[str, datetime] | None) -> dict[str, Any] | None:

@@ -3,10 +3,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import events_router, reminders_router, voice_router
+from app.api import events_router, reminders_router, voice_router, ws_router
 from app.core.config import get_settings
 from app.core.redis import check_redis_connection, close_redis_client
 from app.db.session import check_database_connection
+from app.services.reminder_scheduler import ReminderScheduler
 
 
 settings = get_settings()
@@ -14,14 +15,21 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    yield
-    await close_redis_client()
+    reminder_scheduler = ReminderScheduler()
+    await reminder_scheduler.start()
+    app.state.reminder_scheduler = reminder_scheduler
+    try:
+        yield
+    finally:
+        await reminder_scheduler.stop()
+        await close_redis_client()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.include_router(events_router)
 app.include_router(reminders_router)
 app.include_router(voice_router)
+app.include_router(ws_router)
 
 
 @app.get("/api/health")
