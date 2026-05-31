@@ -29,6 +29,10 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("OPENAI_API_KEY", "API_KEY"),
     )
+    openai_model: str = Field(
+        default="gpt-4o-mini",
+        validation_alias=AliasChoices("OPENAI_MODEL", "API_MODEL"),
+    )
     ws_heartbeat_interval: int = Field(
         default=30,
         validation_alias="WS_HEARTBEAT_INTERVAL",

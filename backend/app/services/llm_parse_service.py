@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -11,6 +12,8 @@ try:  # pragma: no cover - optional dependency in stripped local environments
     import httpx
 except ImportError:  # pragma: no cover - graceful fallback when httpx is absent
     httpx = None
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_API_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
@@ -29,19 +32,20 @@ def _normalize_api_base_url(value: str) -> str:
     return normalized_value or DEFAULT_API_BASE_URL
 
 
-def _load_openai_api_config() -> tuple[str, str]:
+def _load_openai_api_config() -> tuple[str, str, str]:
     env_base_url = _get_env_value("OPENAI_API_BASE_URL", "API_BASE_URL")
     env_api_key = _get_env_value("OPENAI_API_KEY", "API_KEY")
+    env_model = _get_env_value("OPENAI_MODEL", "API_MODEL")
 
     try:
         from app.core.config import get_settings
     except Exception:
-        return _normalize_api_base_url(env_base_url), env_api_key
+        return _normalize_api_base_url(env_base_url), env_api_key, env_model or DEFAULT_MODEL
 
     try:
         settings = get_settings()
     except Exception:
-        return _normalize_api_base_url(env_base_url), env_api_key
+        return _normalize_api_base_url(env_base_url), env_api_key, env_model or DEFAULT_MODEL
 
     api_base_url = (
         getattr(settings, "openai_api_base_url", "")
@@ -49,7 +53,8 @@ def _load_openai_api_config() -> tuple[str, str]:
         or DEFAULT_API_BASE_URL
     )
     api_key = getattr(settings, "openai_api_key", "") or env_api_key
-    return _normalize_api_base_url(api_base_url), api_key
+    model = getattr(settings, "openai_model", "") or env_model or DEFAULT_MODEL
+    return _normalize_api_base_url(api_base_url), api_key, model
 
 
 @dataclass(slots=True)
@@ -68,16 +73,16 @@ class LLMParseService:
         self,
         api_key: str | None = None,
         api_base_url: str | None = None,
-        model: str = DEFAULT_MODEL,
+        model: str | None = None,
         client: Any | None = None,
         timeout: float = 12.0,
     ) -> None:
-        config_api_base_url, config_api_key = _load_openai_api_config()
+        config_api_base_url, config_api_key, config_model = _load_openai_api_config()
         self.api_key = config_api_key if api_key is None else api_key
         self.api_base_url = _normalize_api_base_url(
             config_api_base_url if api_base_url is None else api_base_url
         )
-        self.model = model
+        self.model = model or config_model
         self.client = client
         self.timeout = timeout
 
@@ -146,12 +151,23 @@ class LLMParseService:
                     )
             response.raise_for_status()
             response_payload = response.json()
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "LLM structured parse request failed: model=%s url=%s err=%s",
+                self.model,
+                api_url,
+                exc,
+                exc_info=True,
+            )
             return None
 
         try:
             content = response_payload["choices"][0]["message"]["content"]
         except Exception:
+            logger.warning(
+                "LLM structured parse response missing content: payload=%s",
+                response_payload,
+            )
             return None
 
         if not isinstance(content, str):
@@ -224,7 +240,14 @@ class LLMParseService:
                     "请只输出 JSON 对象，不要输出额外解释。"
                     "输出必须包含 intent、confidence、slots、missing_slots。"
                     "confidence 为 0 到 1 之间的小数。"
-                    "slots 中优先提取 title、date_text、time_text、start_time、end_time、location、participants、reminder_offset_minutes、recurrence_text、target_event。"
+                    "slots 中尽量提取用户原话中出现的信息，可包括 title、date_text、time_text、start_time、end_time、location、participants、reminder_offset_minutes、recurrence_text、target_event。"
+                    "如果用户给了相对时间（如 明天/后天/下周三），同时填入 date_text 与 time_text 的原文，并按 base_time 与 timezone 计算出 start_time 的 ISO 字符串。"
+                    "missing_slots 只填写**用户本轮没有说出来、且该意图必须的字段**。各意图必须字段如下："
+                    "create_event/create_reminder 必须有 title 和 start_time；"
+                    "query_event 无必须字段；"
+                    "update_event 必须有 target_event 与至少一个新字段；"
+                    "delete_event/cancel_reminder 必须有 target_event。"
+                    "其它字段（end_time、location、participants、reminder_offset_minutes、recurrence_text 等）**永远不要出现在 missing_slots**，即使用户没说。"
                     "可以结合 conversation_context 理解当前对话上下文，但不要编造不存在的信息。"
                 ),
             },

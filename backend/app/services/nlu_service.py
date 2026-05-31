@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 import importlib.util
+import logging
 from pathlib import Path
 import re
 import sys
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 try:
     from .time_parser import TimeParser
@@ -128,7 +131,12 @@ class NLUService:
                 base_time=base_time,
                 timezone=timezone,
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "LLM parse raised exception, falling back to rule-based NLU: %s",
+                exc,
+                exc_info=True,
+            )
             return None
 
         if llm_result is None:
@@ -181,10 +189,9 @@ class NLUService:
         if any(word in text for word in {"添加", "新增", "安排", "创建"}):
             return "create_event", 0.8
 
-        if self._find_datetime_parts(text).expression and any(
-            word in text for word in {"开会", "会议", "健身", "上课", "吃饭", "见面", "例会"}
-        ):
-            return "create_event", 0.75
+        datetime_parts = self._find_datetime_parts(text)
+        if datetime_parts.time_text:
+            return "create_event", 0.7
 
         return "unknown", 0.0
 

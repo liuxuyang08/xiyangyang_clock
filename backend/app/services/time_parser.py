@@ -21,6 +21,8 @@ DAY_OFFSETS = {
     "后天": 2,
 }
 
+WEEK_PREFIXES = ("本周", "下周")
+
 PERIOD_HOURS = {
     "凌晨": 0,
     "早上": 6,
@@ -280,16 +282,21 @@ class TimeParser:
         target_date = self._resolve_weekday_date(prefix, weekday, base_time)
         hour_minute = self._extract_hour_minute(text)
         if hour_minute is None:
-            return datetime.combine(target_date, time.min, tzinfo=timezone)
+            candidate = datetime.combine(target_date, time.min, tzinfo=timezone)
+        else:
+            hour, minute = hour_minute
+            period = self._extract_period(text)
+            hour = self._normalize_hour(hour, period)
+            candidate = datetime.combine(
+                target_date,
+                time(hour=hour, minute=minute),
+                tzinfo=timezone,
+            )
 
-        hour, minute = hour_minute
-        period = self._extract_period(text)
-        hour = self._normalize_hour(hour, period)
-        return datetime.combine(
-            target_date,
-            time(hour=hour, minute=minute),
-            tzinfo=timezone,
-        )
+        if prefix is None and candidate < base_time:
+            candidate = candidate + timedelta(days=7)
+
+        return candidate
 
     def _resolve_weekday_date(
         self,
@@ -338,6 +345,7 @@ class TimeParser:
         timezone: ZoneInfo,
     ) -> datetime | None:
         day_offset = self._extract_day_offset(text)
+        has_explicit_day = self._has_explicit_day_marker(text)
         hour_minute = self._extract_hour_minute(text)
 
         if text in DAY_OFFSETS:
@@ -354,18 +362,29 @@ class TimeParser:
         period = self._extract_period(text)
         hour = self._normalize_hour(hour, period)
         target_date = (base_time + timedelta(days=day_offset)).date()
-
-        return datetime.combine(
+        candidate = datetime.combine(
             target_date,
             time(hour=hour, minute=minute),
             tzinfo=timezone,
         )
+
+        if not has_explicit_day and candidate < base_time:
+            candidate = candidate + timedelta(days=1)
+
+        return candidate
 
     def _extract_day_offset(self, text: str) -> int:
         for word, offset in DAY_OFFSETS.items():
             if word in text:
                 return offset
         return 0
+
+    def _has_explicit_day_marker(self, text: str) -> bool:
+        if any(word in text for word in DAY_OFFSETS):
+            return True
+        if any(prefix in text for prefix in WEEK_PREFIXES):
+            return True
+        return False
 
     def _extract_period(self, text: str) -> str | None:
         for period in PERIOD_HOURS:

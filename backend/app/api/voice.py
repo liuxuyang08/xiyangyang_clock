@@ -52,6 +52,34 @@ FOLLOWUP_REPLIES = {
     "confirm_range": "这个时间范围已经过去了，请确认是否继续。",
 }
 
+TIME_ASK_SLOTS = frozenset(
+    {"start_time", "time_text", "datetime", "specific_time", "date_text"}
+)
+
+ASKABLE_SLOTS = frozenset(
+    {
+        "intent",
+        "title",
+        "start_time",
+        "time_text",
+        "datetime",
+        "specific_time",
+        "date_text",
+        "target_event",
+        "confirm_time",
+        "confirm_range",
+    }
+)
+
+EXPLICIT_DATE_MARKERS = ("今天", "明天", "后天", "本周", "下周")
+
+EXPLICIT_DATE_PATTERNS = (
+    re.compile(r"周[一二三四五六日天]"),
+    re.compile(r"星期[一二三四五六日天]"),
+    re.compile(r"\d{1,2}月\d{1,2}[日号]"),
+    re.compile(r"\d{4}年"),
+)
+
 
 async def get_dialog_service(
     session: AsyncSession = Depends(get_db_session),
@@ -132,17 +160,24 @@ async def handle_voice_command(
             timezone=payload.timezone,
             time_parser=time_parser,
         )
+        future_shift_details = _apply_future_shift(
+            slots=slots,
+            raw_text=payload.text,
+            base_time=payload.client_time,
+        )
         missing_slots = _resolve_missing_slots(
             intent=intent,
             slots=slots,
             nlu_missing_slots=nlu_result.missing_slots,
             time_missing_slots=time_parse_details.get("missing_slots", []),
+            base_time=payload.client_time,
         )
         entities = _jsonable(
             {
                 "slots": slots,
                 "missing_slots": missing_slots,
                 "time_parse": time_parse_details,
+                "future_shift": future_shift_details,
             }
         )
 
@@ -1867,15 +1902,111 @@ def _normalize_time_slots(
     }
 
     if parsed.success:
-        if parsed.start_datetime is not None:
-            slots["start_time"] = parsed.start_datetime.isoformat()
-        elif parsed.datetime is not None:
-            slots["start_time"] = parsed.datetime.isoformat()
+        new_start = parsed.start_datetime or parsed.datetime
+        if new_start is not None:
+            existing_start = _try_parse_datetime(slots.get("start_time"))
+            if _should_replace_start_time(existing_start, new_start, base_time):
+                slots["start_time"] = new_start.isoformat()
 
         if parsed.end_datetime is not None:
             slots["end_time"] = parsed.end_datetime.isoformat()
 
     return result
+
+
+def _apply_future_shift(
+    *,
+    slots: dict[str, Any],
+    raw_text: str,
+    base_time: datetime,
+) -> dict[str, Any]:
+    start_value = _try_parse_datetime(slots.get("start_time"))
+    if start_value is None:
+        return {}
+
+    base_aware = _ensure_aware(base_time)
+    start_aware = _ensure_aware(start_value)
+    if start_aware >= base_aware:
+        return {"shifted": False, "is_past": False}
+
+    if _has_explicit_date_marker(raw_text, slots):
+        return {"shifted": False, "is_past": True, "reason": "explicit_date"}
+
+    shifted_aware = start_aware
+    while shifted_aware < base_aware:
+        shifted_aware = shifted_aware + timedelta(days=1)
+
+    delta = shifted_aware - start_aware
+    if start_value.tzinfo is None or start_value.tzinfo.utcoffset(start_value) is None:
+        shifted_value = (start_value + delta).replace(tzinfo=shifted_aware.tzinfo)
+    else:
+        shifted_value = start_value + delta
+    slots["start_time"] = shifted_value.isoformat()
+
+    end_value = _try_parse_datetime(slots.get("end_time"))
+    if end_value is not None:
+        shifted_end = end_value + delta
+        slots["end_time"] = shifted_end.isoformat()
+
+    return {
+        "shifted": True,
+        "is_past": False,
+        "from": start_value.isoformat(),
+        "to": shifted_value.isoformat(),
+        "delta_days": delta.days,
+    }
+
+
+def _has_explicit_date_marker(text: str, slots: Mapping[str, Any]) -> bool:
+    if slots.get("date_text"):
+        return True
+    if not text:
+        return False
+    if any(marker in text for marker in EXPLICIT_DATE_MARKERS):
+        return True
+    for pattern in EXPLICIT_DATE_PATTERNS:
+        if pattern.search(text):
+            return True
+    return False
+
+
+def _try_parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _should_replace_start_time(
+    existing: datetime | None,
+    candidate: datetime,
+    base_time: datetime,
+) -> bool:
+    if existing is None:
+        return True
+
+    base_aware = _ensure_aware(base_time)
+    existing_aware = _ensure_aware(existing)
+    candidate_aware = _ensure_aware(candidate)
+
+    existing_is_future = existing_aware >= base_aware
+    candidate_is_future = candidate_aware >= base_aware
+
+    if existing_is_future and not candidate_is_future:
+        return False
+    if candidate_is_future and not existing_is_future:
+        return True
+    return True
+
+
+def _ensure_aware(value: datetime) -> datetime:
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        return value.replace(tzinfo=fixed_timezone.utc)
+    return value
 
 
 def _build_time_expression(slots: Mapping[str, Any]) -> str | None:
@@ -1896,6 +2027,7 @@ def _resolve_missing_slots(
     slots: Mapping[str, Any],
     nlu_missing_slots: list[str],
     time_missing_slots: list[str],
+    base_time: datetime | None = None,
 ) -> list[str]:
     if intent == "query_event":
         return []
@@ -1910,18 +2042,48 @@ def _resolve_missing_slots(
         )
         return [] if has_delete_context else ["target_event"]
 
+    start_time_value = _try_parse_datetime(slots.get("start_time"))
+    has_valid_start_time = start_time_value is not None
+
     missing_slots: list[str] = []
     for slot in [*nlu_missing_slots, *time_missing_slots]:
+        if slot not in ASKABLE_SLOTS:
+            continue
+        if slot == "target_event" and intent not in {
+            "delete_event",
+            "update_event",
+            "cancel_reminder",
+        }:
+            continue
         if slot == "intent" and intent != "unknown":
             continue
+        if slot in TIME_ASK_SLOTS and has_valid_start_time:
+            continue
+        if slot == "confirm_time" and has_valid_start_time and base_time is not None:
+            base_aware = _ensure_aware(base_time)
+            start_aware = _ensure_aware(start_time_value)
+            if start_aware >= base_aware:
+                continue
         if slot != "intent" and slots.get(slot):
             continue
         if slot not in missing_slots:
             missing_slots.append(slot)
 
     for slot in REQUIRED_SLOTS_BY_INTENT.get(intent, []):
+        if slot in TIME_ASK_SLOTS and has_valid_start_time:
+            continue
         if not slots.get(slot) and slot not in missing_slots:
             missing_slots.append(slot)
+
+    if (
+        intent in {"create_event", "create_reminder"}
+        and has_valid_start_time
+        and base_time is not None
+    ):
+        base_aware = _ensure_aware(base_time)
+        start_aware = _ensure_aware(start_time_value)
+        if start_aware < base_aware and "confirm_time" not in missing_slots:
+            missing_slots.append("confirm_time")
 
     return missing_slots
 

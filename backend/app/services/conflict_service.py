@@ -1,11 +1,14 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.event import Event
 from app.repositories.event_repository import EventRepository
+
+
+DEFAULT_EVENT_DURATION = timedelta(hours=1)
 
 
 @dataclass(slots=True)
@@ -25,9 +28,14 @@ class ConflictService:
         new_start: datetime,
         new_end: datetime,
         existing_start: datetime,
-        existing_end: datetime,
+        existing_end: datetime | None,
     ) -> bool:
-        return new_start < existing_end and new_end > existing_start
+        effective_existing_end = (
+            existing_end
+            if existing_end is not None
+            else existing_start + DEFAULT_EVENT_DURATION
+        )
+        return new_start < effective_existing_end and new_end > existing_start
 
     @staticmethod
     def _build_summary(event: Event) -> ConflictEventSummary:
@@ -44,6 +52,7 @@ class ConflictService:
         start_time: datetime,
         end_time: datetime,
     ) -> list[ConflictEventSummary]:
+        fallback_start_threshold = start_time - DEFAULT_EVENT_DURATION
         statement = (
             select(Event)
             .where(
@@ -51,8 +60,16 @@ class ConflictService:
                 Event.status == "active",
                 Event.deleted_at.is_(None),
                 Event.start_time < end_time,
-                Event.end_time.is_not(None),
-                Event.end_time > start_time,
+                or_(
+                    and_(
+                        Event.end_time.is_not(None),
+                        Event.end_time > start_time,
+                    ),
+                    and_(
+                        Event.end_time.is_(None),
+                        Event.start_time > fallback_start_threshold,
+                    ),
+                ),
             )
             .order_by(Event.start_time.asc())
         )
@@ -62,8 +79,7 @@ class ConflictService:
         return [
             self._build_summary(event)
             for event in events
-            if event.end_time is not None
-            and self.is_conflict(
+            if self.is_conflict(
                 new_start=start_time,
                 new_end=end_time,
                 existing_start=event.start_time,
