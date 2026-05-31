@@ -1,7 +1,6 @@
 
+https://github.com/user-attachments/assets/0042515d-d4b2-48e4-b883-0142dbd86dd5
 
-
-Uploading xiyangyang-demo-v5.mp4…
 
 # 语音版日历工具
 
